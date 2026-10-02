@@ -1,273 +1,161 @@
-# WXPush - 微信消息推送服务 (Cloudflare Workers)
+# WXPush hardened Cloudflare fork
 
-这是一个基于 [Cloudflare Workers](https://workers.cloudflare.com/) 搭建的、轻量级的微信公众号模板消息推送服务。它提供了一个简单的 API 接口，让您可以轻松地通过 HTTP 请求将消息推送到指定的微信用户。
+Based on [frankiejun/wxpush](https://github.com/frankiejun/wxpush) at commit
+`52e2051a93e6042bc7155065cc12dd3c64d0d70f`. The original MIT license is
+retained in `LICENSE`. This fork targets Cloudflare Workers only. The original
+single Worker, Docker image, `GET /wxsend`, token-in-URL test page, and request
+credential overrides are intentionally removed.
 
-## ✨ 特性
+## Architecture
 
-✅ 完全免费  
-✅ 每天 10 万次额度，个人用不完  
-✅ 真正的微信原生弹窗 + 声音提醒  
-✅ 支持多用户  
-✅ 跳转稳定  
-✅ 可无限换皮肤 (使用项目[wxpushSkin](https://github.com/frankiejun/wxpushSkin))  
-✅ 支持docker部署
+| Component | Address | Access | Purpose |
+| --- | --- | --- | --- |
+| API Worker | `https://push-api.matrixsku.com/wxsend` | Cloudflare Access Service Token **and** application Bearer | Receives agent requests, stores details, sends WeChat template messages |
+| View Worker | `https://push.matrixsku.com/m/<random-id>` | Public bearer-by-link | Displays escaped text until exactly 3 days after creation |
+| D1 | `wxpush-messages` | Worker bindings only | Stores full title/content and expiry; hourly cleanup |
 
-## 🎬 视频教学
+The `matrixsku.com` deployment was created on 2026-10-02. Its D1 database ID
+is `e8dc4070-ae3d-4ffd-8da8-a05b9935b0a1` (APAC); the API and View Worker
+names are `wxpush-api` and `wxpush-view`. The API Worker has Worker-level
+Cloudflare Access on **all traffic**, with the reusable
+`wxpush-codex-service-auth` policy limited to the `wxpush-codex-agent` Service
+Token. The current live verification is recorded in `verification.md`.
 
-我们制作了详细的视频教程，手把手教您如何完成所有部署步骤。如果您偏爱视频指导，请点击下方链接观看：
+The WeChat template receives the title, a 180-character plaintext preview, and
+the opaque detail URL. It does **not** receive the full message in the URL.
+Anyone with a detail URL can read it during its 3-day lifetime. Treat the link
+as shareable, not private. Do not send secrets or highly sensitive content.
 
-[<img src="https://look.pics.cloudns.ch/img/极简微信消息推送服务-封面.jpg" alt="点击观看视频教程" width="480">](https://youtu.be/sE1Kcol_XRs?si=G-UbUGlMhyysv-US)  
+Cron is UTC: `0 2 * * MON` = Monday `10:00` Asia/Shanghai sends the weekly
+keepalive; `0 * * * *` cleans expired D1 rows hourly. The View Worker checks
+expiry on every request, so a row is unreadable at 72 hours even before
+physical cleanup (normally within the following hour). Logs contain counts
+and error categories, never content,
+OpenIDs, API tokens, or WeChat access tokens.
 
-[<img src="https://look.pics.cloudns.ch/img/%E5%A6%82%E4%BD%95%E7%A8%B3%E5%AE%9A%E9%83%A8%E7%BD%B2wxpushskin%E9%A1%B9%E7%9B%AE-%E5%B0%81%E9%9D%A2.jpg" alt="点击观看视频教程" width="480">](https://www.youtube.com/watch?v=Hf5_LOyjLWU)
+## Prerequisites
 
-*点击上方图片或链接，即可跳转到 YouTube 观看视频教程。*
+- A Cloudflare account controlling `matrixsku.com`, with Workers, D1, and
+  Cloudflare Access enabled.
+- A WeChat test account or compatible official account with `WX_APPID`,
+  `WX_SECRET`, at least one follower's OpenID, and `WX_TEMPLATE_ID`.
+- Template body with the exact fields `{{title.DATA}}` and `{{content.DATA}}`.
+- Node.js 22+ and `npm install` for local validation and Wrangler.
 
+Never put `WX_SECRET`, `API_TOKEN`, OpenIDs, or Cloudflare Access client secret
+in the repository, the JSONC configs, shell history, or chat. Enter Worker
+secrets interactively through Wrangler or the Cloudflare dashboard. `WX_USERID`
+is treated as a secret because it identifies recipients.
 
+## Provision
 
+1. Run `npm install`, then `npm test` and both dry runs:
 
-## 🚀 部署指南
+   ```sh
+   npx wrangler deploy --dry-run --config wrangler.api.jsonc
+   npx wrangler deploy --dry-run --config wrangler.view.jsonc
+   ```
 
-我们提供多种简单的部署方式，您可以根据自己的需求选择其中一种。
+2. Create an independent D1 database:
 
-### 方法一：直接粘贴代码到 Cloudflare (最简单)
+   ```sh
+   npx wrangler d1 create wxpush-messages
+   ```
 
-这种方法无需任何本地开发环境，只需复制粘贴即可完成部署。
+   This checkout already contains the database ID for `matrixsku.com`. For a
+   different Cloudflare account, replace that ID in **both** JSONC files with
+   the new database ID. Apply the schema before sending:
 
-1.  **登录 Cloudflare 仪表板**
-    *   打开浏览器，访问 [https://dash.cloudflare.com/](https://dash.cloudflare.com/) 并登录。
+   ```sh
+   npx wrangler d1 migrations apply wxpush-messages --remote --config wrangler.api.jsonc
+   ```
 
-2.  **创建 Worker 服务**
-    *   在左侧菜单中，选择 **Workers 和 Pages**。
-    *   点击 **创建应用程序**，然后选择 **创建 Worker**。
-    *   为您的 Worker 指定一个全局唯一的名称 (例如 `my-wxpush-service`)，然后点击 **部署**。
+3. Deploy the API Worker **without secrets**; it returns 503 to send requests
+   until all required secrets are present. In Zero Trust, create a dedicated
+   Service Token and a reusable **Service Auth** policy whose Include rule is
+   that specific token (not "Any Access Service Token"). In Workers & Pages,
+   open `wxpush-api` > Access > Protect this Worker behind Access, select
+   **All traffic**, and attach that policy. This protects production and
+   preview routes. Confirm a request without Access headers receives 403
+   before setting the WeChat secrets. Do not protect `wxpush-view` this way:
+   its random detail links must open in WeChat without an Access login.
 
-3.  **粘贴代码**
-    *   部署完成后，点击 **编辑代码** 进入在线代码编辑器。
-    *   删除编辑器中所有的默认代码。
-    *   将项目 `src/index.js` 文件中的全部内容复制并粘贴到编辑器中。
+   ```sh
+   npx wrangler deploy --config wrangler.api.jsonc
+   ```
 
-4.  **保存并部署**
-    *   点击编辑器右上角的 **保存并部署** 按钮。
+4. Enter the API secrets, then deploy the View Worker:
 
-5.  **配置环境变量 (重要)**
-    *   返回 Worker 的主管理页面，进入 **设置** > **变量**。
-    *   在 **环境变量** 部分，点击 **添加变量**，依次添加以下配置。这些是服务运行所必需的敏感信息。
-        *   `API_TOKEN`: 用于接口调用的访问令牌，请设置一个足够复杂的随机字符串。
-        *   `WX_APPID`: 您的微信公众号 AppID。
-        *   `WX_SECRET`: 您的微信公众号 AppSecret。
-        *   `WX_USERID`: 默认接收消息用户的 OpenID，多个用户请用 `|` 符号分隔 (例如 `openid1|openid2`)。
-        *   `WX_TEMPLATE_ID`: 您要使用的微信模板消息 ID。
-        *   `WX_BASE_URL`: (可选) 点击模板消息后跳转的基础 URL。
-    *   **注意**：添加变量时，请确保勾选 **加密** 选项，以保护您的凭证安全。
+   ```sh
+   npx wrangler secret put API_TOKEN --config wrangler.api.jsonc
+   npx wrangler secret put WX_APPID --config wrangler.api.jsonc
+   npx wrangler secret put WX_SECRET --config wrangler.api.jsonc
+   npx wrangler secret put WX_USERID --config wrangler.api.jsonc
+   npx wrangler secret put WX_TEMPLATE_ID --config wrangler.api.jsonc
+   npx wrangler deploy --config wrangler.view.jsonc
+   ```
 
-### 方法二：Docker 直接部署（需要有docker环境）
+   `API_TOKEN` should be a newly generated random value of at least 32 bytes.
+   `WX_USERID` is one or more allowlisted OpenIDs separated by `|`, at most 10.
+   Both Workers bind the same D1 database. Workers.dev is disabled in both
+   configs; preview URLs are also disabled. The API and View hosts are separate
+   Custom Domains, and each Worker checks its expected hostname. Ensure no
+   extra route bypasses Access. Cloudflare Access enforcement must be verified
+   separately after the application policy is configured.
 
-**拉取镜像**
+5. Add a Cloudflare WAF rate limit for the API hostname/path (start with a low
+   per-minute limit suited to the agent) and an alert for failed Cron/Worker
+   requests. Test Access rejection, Bearer rejection, a real test message,
+   detail rendering, expiry behavior, and the weekly Cron in a non-production
+   environment before depending on it. Access is enforced by Cloudflare's
+   edge policy; the Worker independently checks the Bearer token.
 
-```bash
-docker pull ghcr.io/frankiejun/wxpush:latest
+## Codex agent request
+
+Give Codex only the endpoint and the names of the three credentials it must
+retrieve from its secret environment. Do not paste values into prompts or logs.
+On this machine, the three Codex caller credentials are in
+`$HOME/.config/wxpush-codex/credentials.env` (directory `0700`, file `0600`).
+The included caller reads them from the environment rather than putting their
+values in shell arguments/history:
+
+```sh
+node --env-file="$HOME/.config/wxpush-codex/credentials.env" scripts/send.mjs < message.json
 ```
 
-**运行容器**
+`message.json` contains e.g. `{"title":"任务完成","content":"构建已完成。"}`.
+The caller sends all three headers. Equivalent cURL for diagnostics (be aware
+the expanded header values can appear in the process list):
 
-```bash
-docker run -d --name wxpush \
-  -p 3939:3939 \
-  -e API_TOKEN="your_token" \
-  -e WX_APPID="your_appid" \
-  -e WX_SECRET="your_secret" \
-  -e WX_USERID="openid1|openid2" \
-  -e WX_TEMPLATE_ID="your_template_id" \
-  -e WX_BASE_URL="https://example.com" \
-  -e PORT="3939" \
-  ghcr.io/frankiejun/wxpush:latest
+```sh
+curl --fail-with-body -sS https://push-api.matrixsku.com/wxsend \
+  -H "CF-Access-Client-Id: $WX_CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $WX_CF_ACCESS_CLIENT_SECRET" \
+  -H "Authorization: Bearer $WX_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"title":"任务完成","content":"构建已完成。"}'
 ```
 
-**docker-compose**
+Only `title` (1-80 Unicode characters), `content` (1-8000 Unicode characters),
+and optional `recipients` (array containing only configured OpenIDs) are
+accepted. Maximum request body size is 16 KiB. Omit `recipients` to send to all
+configured users. GET, query parameters, form data, body tokens, per-request
+WeChat credentials, and arbitrary recipients are rejected.
 
-创建 `docker-compose.yml`，直接使用镜像运行：
+Successful response: HTTP 200 with `id`, `detail_url`, `expires_at` (Unix
+seconds), `sent`, and `failed`. A partial/total WeChat failure returns HTTP 502
+with the counts; validation returns 4xx. Do not retry a 502 blindly: some
+recipients may already have received a message. The API currently has no
+idempotency key.
 
-```yaml
-services:
-  wxpush:
-    image: ghcr.io/frankiejun/wxpush:latest
-    ports:
-      - "3939:3939"
-    environment:
-      API_TOKEN: "your_token"
-      WX_APPID: "your_appid"
-      WX_SECRET: "your_secret"
-      WX_USERID: "openid1|openid2"
-      WX_TEMPLATE_ID: "your_template_id"
-      WX_BASE_URL: "https://example.com"
-      PORT: "3939"
-    restart: unless-stopped
-```
+## Verify and rollback
 
-### 方法三：通过关联 GitHub 仓库自动部署
-
-如果您希望通过 Git 进行版本控制和持续集成，推荐使用此方法。
-
-1.  **Fork 或克隆项目**
-    *   首先，将本项目 Fork 到您自己的 GitHub 账户，或者克隆后推送到您自己的新仓库。
-
-2.  **连接到 GitHub**
-    *   登录 Cloudflare 仪表板，进入 **Workers 和 Pages**。
-    *   点击 **创建应用程序**，切换到 **Pages** 选项卡，然后点击 **连接到 Git**。
-
-3.  **选择仓库**
-    *   选择您刚刚创建的 GitHub 仓库。
-
-4.  **配置构建和部署**
-    *   **项目名称**：为您项目指定一个名称。
-    *   **生产分支**：选择您希望部署的分支 (通常是 `main` 或 `master`)。
-    *   **框架预设**：选择 `None`。
-    *   **构建设置**：将所有构建相关的字段 (如构建命令、输出目录) 留空。
-    *   **根目录**：保持默认的 `/` 即可。
-
-5.  **添加环境变量**
-    *   在配置页面的 **环境变量** 部分，添加与 **方法一** 中相同的 `API_TOKEN`, `WX_APPID`, `WX_SECRET` 等变量。
-    *   同样，请务必为每个变量勾选 **加密** 选项。
-
-6.  **保存并部署**
-    *   点击 **保存并部署**。Cloudflare 会自动从您的仓库拉取代码并完成部署。
-    *   此后，每当您向指定的生产分支推送新的代码提交时，Cloudflare 都会自动为您重新部署。
-
-部署成功后，您的服务访问地址会显示在 Worker 或 Pages 的主页面上。
-
-## ⚙️ API 使用方法
-
-服务部署成功后，您可以通过构造 URL 发起 `GET` 请求来推送消息。
-
-### 请求地址
-
-```
-https://<您的Worker地址>/wxsend
-```
-
-### 请求参数
-
-| 参数名      | 类型   | 是否必填 | 描述                                           |
-|-------------|--------|----------|------------------------------------------------|
-| `token`     | String | 是       | 您在 `API_TOKEN` 中设置的访问令牌。            |
-| `title`     | String | 是       | 消息的标题。                                   |
-| `content`   | String | 是       | 消息的具体内容。                               |
-| `appid`     | String | 否       | 临时覆盖默认的微信 AppID。                     |
-| `secret`    | String | 否       | 临时覆盖默认的微信 AppSecret。                 |
-| `userid`    | String | 否       | 临时覆盖默认的接收用户 OpenID。                  |
-| `template_id`| String | 否       | 临时覆盖默认的模板消息 ID。                    |
-| `base_url`  | String | 否       | 临时覆盖默认的跳转 URL。                       |
-
-### 使用示例
-
-**基础推送**
-
-向默认配置的所有用户推送一条消息：
-
-```
-https://<您的Worker地址>/wxsend?title=服务器通知&content=服务已于北京时间%2022:00%20重启&token=your_secret_token
-```
-
-**临时覆盖用户**
-
-向一个临时指定的用户推送消息：
-
-```
-https://<您的Worker地址>/wxsend?title=私人提醒&content=记得带钥匙&token=your_secret_token&userid=temporary_openid_here
-```
-
-### Webhook / POST 请求
-
-除了 `GET` 请求，服务也支持 `POST` 方法，更适合用于自动化的 Webhook 集成。
-
-**请求地址**
-
-```
-https://<您的Worker地址>/wxsend
-```
-
-**请求方法**
-
-```
-POST
-```
-
-**请求头 (Headers)**
-
-```json
-{
-  "Authorization": "你的token",
-  "Content-Type": "application/json"
-}
-```
-
-**请求体 (Body)**
-
-请求体需要是一个 JSON 对象，包含与 `GET` 请求相同的参数。
-
-```json
-{
-  "title": "Webhook 通知",
-  "content": "这是一个通过 POST 请求发送的 Webhook 消息。"
-}
-```
-
-**使用示例 (cURL)**
-
-```bash
-curl -X POST \
-  "https://<您的Worker地址>/wxsend" \
-  -H "Authorization: 你的token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "来自 cURL 的消息",
-    "content": "自动化任务已完成。"
-  }'
-```
-
-### 成功响应
-
-如果消息成功发送给至少一个用户，服务会返回 `HTTP 200` 状态码和 JSON：
-
-```json
-{
-  "msg": "Successfully sent messages to 1 user(s). First response: ok"
-}
-```
-
-### 失败响应
-
-如果发生错误（如 token 错误、缺少参数、微信接口调用失败等），服务会返回相应的 `HTTP 4xx` 或 `5xx` 状态码和 JSON：
-
-```json
-{
-  "msg": "Invalid token"
-}
-```
-
-## 🛡️ 测试账号保活 (可选)
-
-如果您长时间不会通过本服务收到消息（例如低频使用），微信可能因测试账号长期不活跃而将其回收作废。此时可以开启**保活心跳**：Worker 会通过 Cron Trigger 定时运行，每隔指定天数自动给自己发送一条测试消息，以此保持测试账号活跃，同时也能在账号失效时通过日志及时发现。
-
-**适合人群**：长时间不会收到消息的账号。**若经常收到消息，无需设置**，可忽略本节。
-
-**设置方法**：
-
-1. 无需修改代码，`wrangler.toml` 中已内置每日触发的 Cron Trigger。
-2. 在 Cloudflare Worker 的 **设置** > **变量** 中添加环境变量：
-    *   `ALIVE_DAYS`: 保活间隔天数，例如 `30` 表示每 30 天发送一次测试消息。
-3. 保存并重新部署即可生效。
-
-**说明**：
-
-*   **不设置 `ALIVE_DAYS` 则不会运行保活心跳**，行为与之前完全一致。
-*   保活消息会发送给 `WX_USERID` 中配置的所有用户，标题为"保活测试"。
-*   若获取 token 或发送失败，只会在 Worker 日志中记录错误（可通过 Cloudflare 控制台的"日志"查看），此时建议扫码重新登录 [测试号后台](https://mp.weixin.qq.com/debug/cgi-bin/sandbox) 确认账号状态。
-
-## 🤝 贡献
-
-欢迎任何形式的贡献！如果您有好的想法或发现了 Bug，请随时提交 Pull Request 或创建 Issue。
-
-## 📜 许可证
-
-本项目采用 [MIT License](LICENSE) 开源许可证。
+Run `npm test` and both Wrangler dry runs before each deployment. The
+`verification.md` file records the exact baseline and modified checks for this
+fork. `changes.patch` is the patch against the pinned upstream commit.
+`rollback.sh` restores the upstream source/configuration into an **explicit
+destination directory**, never the live checkout or Cloudflare deployment.
+For a deployed rollback, use Cloudflare Workers version rollback for each
+Worker, while retaining D1 until all detail links have expired; restore the
+Access policy before exposing an older API version because upstream accepts
+token-in-URL requests.

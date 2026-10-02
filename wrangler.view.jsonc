@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "wxpush-view",
+  "main": "src/view.js",
+  "compatibility_date": "2026-10-02",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "push.matrixsku.com", "custom_domain": true }
+  ],
+  "vars": {
+    "VIEW_HOST": "push.matrixsku.com"
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "wxpush-messages", "database_id": "e8dc4070-ae3d-4ffd-8da8-a05b9935b0a1", "migrations_dir": "migrations" }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  }
+}

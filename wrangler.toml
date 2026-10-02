@@ -1,6 +1,0 @@
-name = "wxpush"
-main = "src/index.js"
-compatibility_date = "2023-11-21"
-
-[triggers]
-crons = ["0 2 * * *"]

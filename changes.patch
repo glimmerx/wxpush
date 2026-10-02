@@ -1,0 +1,3924 @@
+diff --git a/.github/workflows/docker-build.yml b/.github/workflows/docker-build.yml
+deleted file mode 100644
+index cacfcad..0000000
+--- a/.github/workflows/docker-build.yml
++++ /dev/null
+@@ -1,38 +0,0 @@
+-name: Build Docker Image
+-
+-on:
+-  workflow_dispatch:
+-
+-jobs:
+-  build:
+-    runs-on: ubuntu-latest
+-    permissions:
+-      contents: read
+-      packages: write
+-
+-    steps:
+-      - name: Checkout
+-        uses: actions/checkout@v4
+-
+-      - name: Set up QEMU
+-        uses: docker/setup-qemu-action@v3
+-
+-      - name: Set up Docker Buildx
+-        uses: docker/setup-buildx-action@v3
+-
+-      - name: Login to GHCR
+-        uses: docker/login-action@v3
+-        with:
+-          registry: ghcr.io
+-          username: ${{ github.actor }}
+-          password: ${{ secrets.GITHUB_TOKEN }}
+-
+-      - name: Build and push
+-        uses: docker/build-push-action@v6
+-        with:
+-          context: .
+-          push: true
+-          tags: |
+-            ghcr.io/frankiejun/wxpush:latest
+-            ghcr.io/frankiejun/wxpush:${{ github.run_number }}
+-          platforms: linux/amd64,linux/arm64
+diff --git a/.gitignore b/.gitignore
+index 48783f8..86ce128 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,2 +1,5 @@
+-docker-compose.yml
+-.gitignore
++node_modules/
++.wrangler/
++.dev.vars*
++.env*
++*.log
+diff --git a/Dockerfile b/Dockerfile
+deleted file mode 100644
+index ff9053d..0000000
+--- a/Dockerfile
++++ /dev/null
+@@ -1,55 +0,0 @@
+-FROM node:20-slim
+-WORKDIR /app
+-COPY src/index.js /app/src/index.js
+-RUN mkdir -p /app/runtime
+-RUN cat <<'EOF' > /app/runtime/server.mjs
+-import http from 'node:http';
+-import { Readable } from 'node:stream';
+-import worker from '../src/index.js';
+-
+-const port = process.env.PORT ? Number(process.env.PORT) : 3939;
+-
+-const server = http.createServer(async (req, res) => {
+-  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+-  const headers = new Headers();
+-  for (const [k, v] of Object.entries(req.headers)) {
+-    if (Array.isArray(v)) {
+-      for (const item of v) headers.append(k, item);
+-    } else if (v !== undefined) {
+-      headers.append(k, v);
+-    }
+-  }
+-  const method = req.method || 'GET';
+-  const body = method === 'GET' || method === 'HEAD' ? null : Readable.toWeb(req);
+-  const requestInit = { method, headers, body };
+-  if (body) requestInit.duplex = 'half';
+-  const request = new Request(url, requestInit);
+-  const env = { ...process.env };
+-  const ctx = { waitUntil: (p) => p?.catch(() => {}) };
+-  try {
+-    const response = await worker.fetch(request, env, ctx);
+-    res.statusCode = response.status;
+-    response.headers.forEach((value, key) => {
+-      res.setHeader(key, value);
+-    });
+-    if (response.body) {
+-      const reader = response.body.getReader();
+-      res.on('close', () => reader.cancel().catch(() => {}));
+-      while (true) {
+-        const { done, value } = await reader.read();
+-        if (done) break;
+-        res.write(Buffer.from(value));
+-      }
+-    }
+-    res.end();
+-  } catch (err) {
+-    res.statusCode = 500;
+-    res.setHeader('content-type', 'text/plain; charset=utf-8');
+-    res.end(err?.message || 'Internal Server Error');
+-  }
+-});
+-
+-server.listen(port);
+-EOF
+-EXPOSE 3939
+-CMD ["node", "/app/runtime/server.mjs"]
+\ No newline at end of file
+diff --git a/README.md b/README.md
+index 33589de..b9c33cc 100644
+--- a/README.md
++++ b/README.md
+@@ -1,273 +1,161 @@
+-# WXPush - 微信消息推送服务 (Cloudflare Workers)
+-
+-这是一个基于 [Cloudflare Workers](https://workers.cloudflare.com/) 搭建的、轻量级的微信公众号模板消息推送服务。它提供了一个简单的 API 接口，让您可以轻松地通过 HTTP 请求将消息推送到指定的微信用户。
+-
+-## ✨ 特性
+-
+-✅ 完全免费  
+-✅ 每天 10 万次额度，个人用不完  
+-✅ 真正的微信原生弹窗 + 声音提醒  
+-✅ 支持多用户  
+-✅ 跳转稳定  
+-✅ 可无限换皮肤 (使用项目[wxpushSkin](https://github.com/frankiejun/wxpushSkin))  
+-✅ 支持docker部署
+-
+-## 🎬 视频教学
+-
+-我们制作了详细的视频教程，手把手教您如何完成所有部署步骤。如果您偏爱视频指导，请点击下方链接观看：
+-
+-[<img src="https://look.pics.cloudns.ch/img/极简微信消息推送服务-封面.jpg" alt="点击观看视频教程" width="480">](https://youtu.be/sE1Kcol_XRs?si=G-UbUGlMhyysv-US)  
+-
+-[<img src="https://look.pics.cloudns.ch/img/%E5%A6%82%E4%BD%95%E7%A8%B3%E5%AE%9A%E9%83%A8%E7%BD%B2wxpushskin%E9%A1%B9%E7%9B%AE-%E5%B0%81%E9%9D%A2.jpg" alt="点击观看视频教程" width="480">](https://www.youtube.com/watch?v=Hf5_LOyjLWU)
+-
+-*点击上方图片或链接，即可跳转到 YouTube 观看视频教程。*
+-
+-
+-
+-
+-## 🚀 部署指南
+-
+-我们提供多种简单的部署方式，您可以根据自己的需求选择其中一种。
+-
+-### 方法一：直接粘贴代码到 Cloudflare (最简单)
+-
+-这种方法无需任何本地开发环境，只需复制粘贴即可完成部署。
+-
+-1.  **登录 Cloudflare 仪表板**
+-    *   打开浏览器，访问 [https://dash.cloudflare.com/](https://dash.cloudflare.com/) 并登录。
+-
+-2.  **创建 Worker 服务**
+-    *   在左侧菜单中，选择 **Workers 和 Pages**。
+-    *   点击 **创建应用程序**，然后选择 **创建 Worker**。
+-    *   为您的 Worker 指定一个全局唯一的名称 (例如 `my-wxpush-service`)，然后点击 **部署**。
+-
+-3.  **粘贴代码**
+-    *   部署完成后，点击 **编辑代码** 进入在线代码编辑器。
+-    *   删除编辑器中所有的默认代码。
+-    *   将项目 `src/index.js` 文件中的全部内容复制并粘贴到编辑器中。
+-
+-4.  **保存并部署**
+-    *   点击编辑器右上角的 **保存并部署** 按钮。
+-
+-5.  **配置环境变量 (重要)**
+-    *   返回 Worker 的主管理页面，进入 **设置** > **变量**。
+-    *   在 **环境变量** 部分，点击 **添加变量**，依次添加以下配置。这些是服务运行所必需的敏感信息。
+-        *   `API_TOKEN`: 用于接口调用的访问令牌，请设置一个足够复杂的随机字符串。
+-        *   `WX_APPID`: 您的微信公众号 AppID。
+-        *   `WX_SECRET`: 您的微信公众号 AppSecret。
+-        *   `WX_USERID`: 默认接收消息用户的 OpenID，多个用户请用 `|` 符号分隔 (例如 `openid1|openid2`)。
+-        *   `WX_TEMPLATE_ID`: 您要使用的微信模板消息 ID。
+-        *   `WX_BASE_URL`: (可选) 点击模板消息后跳转的基础 URL。
+-    *   **注意**：添加变量时，请确保勾选 **加密** 选项，以保护您的凭证安全。
+-
+-### 方法二：Docker 直接部署（需要有docker环境）
+-
+-**拉取镜像**
+-
+-```bash
+-docker pull ghcr.io/frankiejun/wxpush:latest
+-```
+-
+-**运行容器**
+-
+-```bash
+-docker run -d --name wxpush \
+-  -p 3939:3939 \
+-  -e API_TOKEN="your_token" \
+-  -e WX_APPID="your_appid" \
+-  -e WX_SECRET="your_secret" \
+-  -e WX_USERID="openid1|openid2" \
+-  -e WX_TEMPLATE_ID="your_template_id" \
+-  -e WX_BASE_URL="https://example.com" \
+-  -e PORT="3939" \
+-  ghcr.io/frankiejun/wxpush:latest
+-```
+-
+-**docker-compose**
+-
+-创建 `docker-compose.yml`，直接使用镜像运行：
+-
+-```yaml
+-services:
+-  wxpush:
+-    image: ghcr.io/frankiejun/wxpush:latest
+-    ports:
+-      - "3939:3939"
+-    environment:
+-      API_TOKEN: "your_token"
+-      WX_APPID: "your_appid"
+-      WX_SECRET: "your_secret"
+-      WX_USERID: "openid1|openid2"
+-      WX_TEMPLATE_ID: "your_template_id"
+-      WX_BASE_URL: "https://example.com"
+-      PORT: "3939"
+-    restart: unless-stopped
+-```
+-
+-### 方法三：通过关联 GitHub 仓库自动部署
+-
+-如果您希望通过 Git 进行版本控制和持续集成，推荐使用此方法。
+-
+-1.  **Fork 或克隆项目**
+-    *   首先，将本项目 Fork 到您自己的 GitHub 账户，或者克隆后推送到您自己的新仓库。
+-
+-2.  **连接到 GitHub**
+-    *   登录 Cloudflare 仪表板，进入 **Workers 和 Pages**。
+-    *   点击 **创建应用程序**，切换到 **Pages** 选项卡，然后点击 **连接到 Git**。
+-
+-3.  **选择仓库**
+-    *   选择您刚刚创建的 GitHub 仓库。
+-
+-4.  **配置构建和部署**
+-    *   **项目名称**：为您项目指定一个名称。
+-    *   **生产分支**：选择您希望部署的分支 (通常是 `main` 或 `master`)。
+-    *   **框架预设**：选择 `None`。
+-    *   **构建设置**：将所有构建相关的字段 (如构建命令、输出目录) 留空。
+-    *   **根目录**：保持默认的 `/` 即可。
+-
+-5.  **添加环境变量**
+-    *   在配置页面的 **环境变量** 部分，添加与 **方法一** 中相同的 `API_TOKEN`, `WX_APPID`, `WX_SECRET` 等变量。
+-    *   同样，请务必为每个变量勾选 **加密** 选项。
+-
+-6.  **保存并部署**
+-    *   点击 **保存并部署**。Cloudflare 会自动从您的仓库拉取代码并完成部署。
+-    *   此后，每当您向指定的生产分支推送新的代码提交时，Cloudflare 都会自动为您重新部署。
+-
+-部署成功后，您的服务访问地址会显示在 Worker 或 Pages 的主页面上。
+-
+-## ⚙️ API 使用方法
+-
+-服务部署成功后，您可以通过构造 URL 发起 `GET` 请求来推送消息。
+-
+-### 请求地址
+-
+-```
+-https://<您的Worker地址>/wxsend
+-```
+-
+-### 请求参数
+-
+-| 参数名      | 类型   | 是否必填 | 描述                                           |
+-|-------------|--------|----------|------------------------------------------------|
+-| `token`     | String | 是       | 您在 `API_TOKEN` 中设置的访问令牌。            |
+-| `title`     | String | 是       | 消息的标题。                                   |
+-| `content`   | String | 是       | 消息的具体内容。                               |
+-| `appid`     | String | 否       | 临时覆盖默认的微信 AppID。                     |
+-| `secret`    | String | 否       | 临时覆盖默认的微信 AppSecret。                 |
+-| `userid`    | String | 否       | 临时覆盖默认的接收用户 OpenID。                  |
+-| `template_id`| String | 否       | 临时覆盖默认的模板消息 ID。                    |
+-| `base_url`  | String | 否       | 临时覆盖默认的跳转 URL。                       |
+-
+-### 使用示例
+-
+-**基础推送**
+-
+-向默认配置的所有用户推送一条消息：
+-
+-```
+-https://<您的Worker地址>/wxsend?title=服务器通知&content=服务已于北京时间%2022:00%20重启&token=your_secret_token
+-```
+-
+-**临时覆盖用户**
+-
+-向一个临时指定的用户推送消息：
+-
+-```
+-https://<您的Worker地址>/wxsend?title=私人提醒&content=记得带钥匙&token=your_secret_token&userid=temporary_openid_here
+-```
+-
+-### Webhook / POST 请求
+-
+-除了 `GET` 请求，服务也支持 `POST` 方法，更适合用于自动化的 Webhook 集成。
+-
+-**请求地址**
+-
+-```
+-https://<您的Worker地址>/wxsend
+-```
+-
+-**请求方法**
+-
+-```
+-POST
+-```
+-
+-**请求头 (Headers)**
+-
+-```json
+-{
+-  "Authorization": "你的token",
+-  "Content-Type": "application/json"
+-}
+-```
+-
+-**请求体 (Body)**
+-
+-请求体需要是一个 JSON 对象，包含与 `GET` 请求相同的参数。
+-
+-```json
+-{
+-  "title": "Webhook 通知",
+-  "content": "这是一个通过 POST 请求发送的 Webhook 消息。"
+-}
+-```
+-
+-**使用示例 (cURL)**
+-
+-```bash
+-curl -X POST \
+-  "https://<您的Worker地址>/wxsend" \
+-  -H "Authorization: 你的token" \
+-  -H "Content-Type: application/json" \
+-  -d '{
+-    "title": "来自 cURL 的消息",
+-    "content": "自动化任务已完成。"
+-  }'
+-```
+-
+-### 成功响应
+-
+-如果消息成功发送给至少一个用户，服务会返回 `HTTP 200` 状态码和 JSON：
+-
+-```json
+-{
+-  "msg": "Successfully sent messages to 1 user(s). First response: ok"
+-}
+-```
+-
+-### 失败响应
+-
+-如果发生错误（如 token 错误、缺少参数、微信接口调用失败等），服务会返回相应的 `HTTP 4xx` 或 `5xx` 状态码和 JSON：
+-
+-```json
+-{
+-  "msg": "Invalid token"
+-}
+-```
+-
+-## 🛡️ 测试账号保活 (可选)
+-
+-如果您长时间不会通过本服务收到消息（例如低频使用），微信可能因测试账号长期不活跃而将其回收作废。此时可以开启**保活心跳**：Worker 会通过 Cron Trigger 定时运行，每隔指定天数自动给自己发送一条测试消息，以此保持测试账号活跃，同时也能在账号失效时通过日志及时发现。
+-
+-**适合人群**：长时间不会收到消息的账号。**若经常收到消息，无需设置**，可忽略本节。
+-
+-**设置方法**：
+-
+-1. 无需修改代码，`wrangler.toml` 中已内置每日触发的 Cron Trigger。
+-2. 在 Cloudflare Worker 的 **设置** > **变量** 中添加环境变量：
+-    *   `ALIVE_DAYS`: 保活间隔天数，例如 `30` 表示每 30 天发送一次测试消息。
+-3. 保存并重新部署即可生效。
+-
+-**说明**：
+-
+-*   **不设置 `ALIVE_DAYS` 则不会运行保活心跳**，行为与之前完全一致。
+-*   保活消息会发送给 `WX_USERID` 中配置的所有用户，标题为"保活测试"。
+-*   若获取 token 或发送失败，只会在 Worker 日志中记录错误（可通过 Cloudflare 控制台的"日志"查看），此时建议扫码重新登录 [测试号后台](https://mp.weixin.qq.com/debug/cgi-bin/sandbox) 确认账号状态。
+-
+-## 🤝 贡献
+-
+-欢迎任何形式的贡献！如果您有好的想法或发现了 Bug，请随时提交 Pull Request 或创建 Issue。
+-
+-## 📜 许可证
+-
+-本项目采用 [MIT License](LICENSE) 开源许可证。
++# WXPush hardened Cloudflare fork
++
++Based on [frankiejun/wxpush](https://github.com/frankiejun/wxpush) at commit
++`52e2051a93e6042bc7155065cc12dd3c64d0d70f`. The original MIT license is
++retained in `LICENSE`. This fork targets Cloudflare Workers only. The original
++single Worker, Docker image, `GET /wxsend`, token-in-URL test page, and request
++credential overrides are intentionally removed.
++
++## Architecture
++
++| Component | Address | Access | Purpose |
++| --- | --- | --- | --- |
++| API Worker | `https://push-api.matrixsku.com/wxsend` | Cloudflare Access Service Token **and** application Bearer | Receives agent requests, stores details, sends WeChat template messages |
++| View Worker | `https://push.matrixsku.com/m/<random-id>` | Public bearer-by-link | Displays escaped text until exactly 3 days after creation |
++| D1 | `wxpush-messages` | Worker bindings only | Stores full title/content and expiry; hourly cleanup |
++
++The `matrixsku.com` deployment was created on 2026-10-02. Its D1 database ID
++is `e8dc4070-ae3d-4ffd-8da8-a05b9935b0a1` (APAC); the API and View Worker
++names are `wxpush-api` and `wxpush-view`. The API Worker has Worker-level
++Cloudflare Access on **all traffic**, with the reusable
++`wxpush-codex-service-auth` policy limited to the `wxpush-codex-agent` Service
++Token. The current live verification is recorded in `verification.md`.
++
++The WeChat template receives the title, a 180-character plaintext preview, and
++the opaque detail URL. It does **not** receive the full message in the URL.
++Anyone with a detail URL can read it during its 3-day lifetime. Treat the link
++as shareable, not private. Do not send secrets or highly sensitive content.
++
++Cron is UTC: `0 2 * * MON` = Monday `10:00` Asia/Shanghai sends the weekly
++keepalive; `0 * * * *` cleans expired D1 rows hourly. The View Worker checks
++expiry on every request, so a row is unreadable at 72 hours even before
++physical cleanup (normally within the following hour). Logs contain counts
++and error categories, never content,
++OpenIDs, API tokens, or WeChat access tokens.
++
++## Prerequisites
++
++- A Cloudflare account controlling `matrixsku.com`, with Workers, D1, and
++  Cloudflare Access enabled.
++- A WeChat test account or compatible official account with `WX_APPID`,
++  `WX_SECRET`, at least one follower's OpenID, and `WX_TEMPLATE_ID`.
++- Template body with the exact fields `{{title.DATA}}` and `{{content.DATA}}`.
++- Node.js 22+ and `npm install` for local validation and Wrangler.
++
++Never put `WX_SECRET`, `API_TOKEN`, OpenIDs, or Cloudflare Access client secret
++in the repository, the JSONC configs, shell history, or chat. Enter Worker
++secrets interactively through Wrangler or the Cloudflare dashboard. `WX_USERID`
++is treated as a secret because it identifies recipients.
++
++## Provision
++
++1. Run `npm install`, then `npm test` and both dry runs:
++
++   ```sh
++   npx wrangler deploy --dry-run --config wrangler.api.jsonc
++   npx wrangler deploy --dry-run --config wrangler.view.jsonc
++   ```
++
++2. Create an independent D1 database:
++
++   ```sh
++   npx wrangler d1 create wxpush-messages
++   ```
++
++   This checkout already contains the database ID for `matrixsku.com`. For a
++   different Cloudflare account, replace that ID in **both** JSONC files with
++   the new database ID. Apply the schema before sending:
++
++   ```sh
++   npx wrangler d1 migrations apply wxpush-messages --remote --config wrangler.api.jsonc
++   ```
++
++3. Deploy the API Worker **without secrets**; it returns 503 to send requests
++   until all required secrets are present. In Zero Trust, create a dedicated
++   Service Token and a reusable **Service Auth** policy whose Include rule is
++   that specific token (not "Any Access Service Token"). In Workers & Pages,
++   open `wxpush-api` > Access > Protect this Worker behind Access, select
++   **All traffic**, and attach that policy. This protects production and
++   preview routes. Confirm a request without Access headers receives 403
++   before setting the WeChat secrets. Do not protect `wxpush-view` this way:
++   its random detail links must open in WeChat without an Access login.
++
++   ```sh
++   npx wrangler deploy --config wrangler.api.jsonc
++   ```
++
++4. Enter the API secrets, then deploy the View Worker:
++
++   ```sh
++   npx wrangler secret put API_TOKEN --config wrangler.api.jsonc
++   npx wrangler secret put WX_APPID --config wrangler.api.jsonc
++   npx wrangler secret put WX_SECRET --config wrangler.api.jsonc
++   npx wrangler secret put WX_USERID --config wrangler.api.jsonc
++   npx wrangler secret put WX_TEMPLATE_ID --config wrangler.api.jsonc
++   npx wrangler deploy --config wrangler.view.jsonc
++   ```
++
++   `API_TOKEN` should be a newly generated random value of at least 32 bytes.
++   `WX_USERID` is one or more allowlisted OpenIDs separated by `|`, at most 10.
++   Both Workers bind the same D1 database. Workers.dev is disabled in both
++   configs; preview URLs are also disabled. The API and View hosts are separate
++   Custom Domains, and each Worker checks its expected hostname. Ensure no
++   extra route bypasses Access. Cloudflare Access enforcement must be verified
++   separately after the application policy is configured.
++
++5. Add a Cloudflare WAF rate limit for the API hostname/path (start with a low
++   per-minute limit suited to the agent) and an alert for failed Cron/Worker
++   requests. Test Access rejection, Bearer rejection, a real test message,
++   detail rendering, expiry behavior, and the weekly Cron in a non-production
++   environment before depending on it. Access is enforced by Cloudflare's
++   edge policy; the Worker independently checks the Bearer token.
++
++## Codex agent request
++
++Give Codex only the endpoint and the names of the three credentials it must
++retrieve from its secret environment. Do not paste values into prompts or logs.
++On this machine, the three Codex caller credentials are in
++`$HOME/.config/wxpush-codex/credentials.env` (directory `0700`, file `0600`).
++The included caller reads them from the environment rather than putting their
++values in shell arguments/history:
++
++```sh
++node --env-file="$HOME/.config/wxpush-codex/credentials.env" scripts/send.mjs < message.json
++```
++
++`message.json` contains e.g. `{"title":"任务完成","content":"构建已完成。"}`.
++The caller sends all three headers. Equivalent cURL for diagnostics (be aware
++the expanded header values can appear in the process list):
++
++```sh
++curl --fail-with-body -sS https://push-api.matrixsku.com/wxsend \
++  -H "CF-Access-Client-Id: $WX_CF_ACCESS_CLIENT_ID" \
++  -H "CF-Access-Client-Secret: $WX_CF_ACCESS_CLIENT_SECRET" \
++  -H "Authorization: Bearer $WX_API_TOKEN" \
++  -H 'Content-Type: application/json' \
++  --data '{"title":"任务完成","content":"构建已完成。"}'
++```
++
++Only `title` (1-80 Unicode characters), `content` (1-8000 Unicode characters),
++and optional `recipients` (array containing only configured OpenIDs) are
++accepted. Maximum request body size is 16 KiB. Omit `recipients` to send to all
++configured users. GET, query parameters, form data, body tokens, per-request
++WeChat credentials, and arbitrary recipients are rejected.
++
++Successful response: HTTP 200 with `id`, `detail_url`, `expires_at` (Unix
++seconds), `sent`, and `failed`. A partial/total WeChat failure returns HTTP 502
++with the counts; validation returns 4xx. Do not retry a 502 blindly: some
++recipients may already have received a message. The API currently has no
++idempotency key.
++
++## Verify and rollback
++
++Run `npm test` and both Wrangler dry runs before each deployment. The
++`verification.md` file records the exact baseline and modified checks for this
++fork. `changes.patch` is the patch against the pinned upstream commit.
++`rollback.sh` restores the upstream source/configuration into an **explicit
++destination directory**, never the live checkout or Cloudflare deployment.
++For a deployed rollback, use Cloudflare Workers version rollback for each
++Worker, while retaining D1 until all detail links have expired; restore the
++Access policy before exposing an older API version because upstream accepts
++token-in-URL requests.
+diff --git a/migrations/0001_messages.sql b/migrations/0001_messages.sql
+new file mode 100644
+index 0000000..f5322db
+--- /dev/null
++++ b/migrations/0001_messages.sql
+@@ -0,0 +1,9 @@
++CREATE TABLE IF NOT EXISTS messages (
++  id TEXT PRIMARY KEY,
++  title TEXT NOT NULL,
++  content TEXT NOT NULL,
++  created_at INTEGER NOT NULL,
++  expires_at INTEGER NOT NULL
++);
++
++CREATE INDEX IF NOT EXISTS idx_messages_expires_at ON messages (expires_at);
+diff --git a/package-lock.json b/package-lock.json
+new file mode 100644
+index 0000000..435adee
+--- /dev/null
++++ b/package-lock.json
+@@ -0,0 +1,1451 @@
++{
++  "name": "wxpush-hardened",
++  "lockfileVersion": 3,
++  "requires": true,
++  "packages": {
++    "": {
++      "name": "wxpush-hardened",
++      "devDependencies": {
++        "wrangler": "^4.42.0"
++      }
++    },
++    "node_modules/@cloudflare/kv-asset-handler": {
++      "version": "0.5.0",
++      "resolved": "https://registry.npmmirror.com/@cloudflare/kv-asset-handler/-/kv-asset-handler-0.5.0.tgz",
++      "integrity": "sha512-jxQYkj8dSIzc0cD6cMMNdOc1UVjqSqu8BZdor5s8cGjW2I8BjODt/kWPVdY+u9zj3ms75Q5qaZgnxUad83+eAg==",
++      "dev": true,
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@cloudflare/unenv-preset": {
++      "version": "2.16.2",
++      "resolved": "https://registry.npmmirror.com/@cloudflare/unenv-preset/-/unenv-preset-2.16.2.tgz",
++      "integrity": "sha512-JBP1+Z7ZSNG/d4mRP+y8VC5dka3tZVMLEZRvS+rzQ4DGV1EoxRFQckcJTTkXbHSQiTj0DtNI01Zwb/V2fX0mvQ==",
++      "dev": true,
++      "peerDependencies": {
++        "unenv": "2.0.0-rc.24",
++        "workerd": ">1.20260305.0 <2.0.0-0"
++      },
++      "peerDependenciesMeta": {
++        "workerd": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@cloudflare/workerd-darwin-64": {
++      "version": "1.20261001.1",
++      "resolved": "https://registry.npmmirror.com/@cloudflare/workerd-darwin-64/-/workerd-darwin-64-1.20261001.1.tgz",
++      "integrity": "sha512-4cgSgDf28JSw/P5Dj5GCS59hzVqS5XnmGAWNkvYHLI6ODU9idGaMMNEuhJXDkEG/lsABmlVlnCgsdh2VbKWepw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/@cloudflare/workerd-darwin-arm64": {
++      "version": "1.20261001.1",
++      "resolved": "https://registry.npmmirror.com/@cloudflare/workerd-darwin-arm64/-/workerd-darwin-arm64-1.20261001.1.tgz",
++      "integrity": "sha512-8ulAWruEVouNmEIsQsy9WSSCS9zkLu93W2MTwp5esiFyoPp05BNSVFIFsYSPi1pkFmBBd7fsnwMpbLkaJLaVPQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/@cloudflare/workerd-linux-64": {
++      "version": "1.20261001.1",
++      "resolved": "https://registry.npmmirror.com/@cloudflare/workerd-linux-64/-/workerd-linux-64-1.20261001.1.tgz",
++      "integrity": "sha512-kZbTZJGrhsMOdqZ2BIybjaBRLZjYsRLWj7mcNw/6Y3hodOhp5MrNzcz4iWGwNVWwyIV+7Pl+/LX5VcgnRqdHOg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/@cloudflare/workerd-linux-arm64": {
++      "version": "1.20261001.1",
++      "resolved": "https://registry.npmmirror.com/@cloudflare/workerd-linux-arm64/-/workerd-linux-arm64-1.20261001.1.tgz",
++      "integrity": "sha512-oOk3Zj6k/8oP0FJgZBWDn7+BqbsqIMEMaV95pulHPVbwVu4wYoLfQq2hp0vkbCNsCFLqZb7cqixXdrwD54ZIow==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/@cloudflare/workerd-windows-64": {
++      "version": "1.20261001.1",
++      "resolved": "https://registry.npmmirror.com/@cloudflare/workerd-windows-64/-/workerd-windows-64-1.20261001.1.tgz",
++      "integrity": "sha512-uRxm5W4VyBkoSaoP1BfOuH0873tE+vxsknF4sab6/5YIRvIAufChq3QDp+zlAn67PuGPGcn7W8QraA0t4ucmOQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/@cspotcode/source-map-support": {
++      "version": "0.8.1",
++      "resolved": "https://registry.npmmirror.com/@cspotcode/source-map-support/-/source-map-support-0.8.1.tgz",
++      "integrity": "sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==",
++      "dev": true,
++      "dependencies": {
++        "@jridgewell/trace-mapping": "0.3.9"
++      },
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "resolved": "https://registry.npmmirror.com/@emnapi/runtime/-/runtime-1.11.3.tgz",
++      "integrity": "sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA==",
++      "dev": true,
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@esbuild/aix-ppc64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/aix-ppc64/-/aix-ppc64-0.28.1.tgz",
++      "integrity": "sha512-Svl7tq8k/08+p6CXPpRjQ1fKX+1odH/BQbb48fV6fj3CWHhsoIOoY87w1oHXm0qEpkIK3ZfVgp0hed3XBXzXMQ==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "aix"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/android-arm": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/android-arm/-/android-arm-0.28.1.tgz",
++      "integrity": "sha512-0k2F129Xdio1TdJfzJ8sy1Q47vUD2NnwdhiAf7drUN1EBTfPf4hsFCtmMgu/6m8JSzsBrlmVjudMBQqOfG8usQ==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/android-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/android-arm64/-/android-arm64-0.28.1.tgz",
++      "integrity": "sha512-34EGEbCIAgosYz6goLcopX6Mo7NyGv9tfwEM2/7Ce2VcVRk568iSvniGWcUXIy7wEDR1wzolcxcriFVrWYcwBg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/android-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/android-x64/-/android-x64-0.28.1.tgz",
++      "integrity": "sha512-dbwY7ltSMDWsRatcRpCnES4F+im88OCUgGZjy52shC7GqHRE/cYlxNbB4Z4UpJswpcc4Qxd2oE/ufM0p61IKng==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/darwin-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/darwin-arm64/-/darwin-arm64-0.28.1.tgz",
++      "integrity": "sha512-TZbWkQY7kvTAXbXUT7uVACR5cMHsDiSz9z7ZKAX/RTq/WJEk3QyRr0wZpNhBDX+/0CtdqUIJlOiodQcta6tY3Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/darwin-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/darwin-x64/-/darwin-x64-0.28.1.tgz",
++      "integrity": "sha512-zfdzgK9ACBNZLI/CyHTOx81SyNbM6YXn7rxSgX97VjyiPl9W1i4Ka4fgKECEoFCKGpvBj5qArWIGgQjOwkgskQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/freebsd-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/freebsd-arm64/-/freebsd-arm64-0.28.1.tgz",
++      "integrity": "sha512-wG2EA8ENdEI0qhkSZMjfqrdY+ziCYCPMmtZjjIwOmXFjmyzEHn+UUxk5of+SYsjtfs3VpnlC7QLzSI5hY/rOAw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/freebsd-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/freebsd-x64/-/freebsd-x64-0.28.1.tgz",
++      "integrity": "sha512-i7dZ9vQgnvSCzi/rYCXNgtF/U+eKZNJBzu3eTQbRgHnM7tNSizLOkRFAl3qzVc/Op/u5YkHHa4pf/3DOYHthLQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-arm": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/linux-arm/-/linux-arm-0.28.1.tgz",
++      "integrity": "sha512-qVXBOHQS+d5Y722GwJzJUtOLlX7km3CraOaGormF1pDtPd2C/l1SHRPgjLunLGe51Sh5YYWKMFDyV4SxgMQYTQ==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/linux-arm64/-/linux-arm64-0.28.1.tgz",
++      "integrity": "sha512-yHs+0uc8+nvEAfAfxrWQKK5peSNzBc4PegcMO0EJ2hT71uA7vB8Ihg2e77R2P7SG5uYjPbHlLLmve4LLLRCf0g==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-ia32": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/linux-ia32/-/linux-ia32-0.28.1.tgz",
++      "integrity": "sha512-d1z4ZuP0ajrfz/FhGT4vv278rX8KnPPJx8i5+AtK7TYbx9Le9F1hyzurZpkEyjkGa9dUGhQow4C1NmeGvqxN2w==",
++      "cpu": [
++        "ia32"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-loong64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/linux-loong64/-/linux-loong64-0.28.1.tgz",
++      "integrity": "sha512-M5sRjUVZrkm1OAPR3dlOYzNmN+loZKGVi1VUQGrwuqLcbR6qeAz+famMhjASeH3YVKvZz+zT1jlh/keC3Rj/lg==",
++      "cpu": [
++        "loong64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-mips64el": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/linux-mips64el/-/linux-mips64el-0.28.1.tgz",
++      "integrity": "sha512-mRObBZeHh2OxcBFPWE/FjylkRgZdYuiTR3vaTozquCGOH14iP9oN4x4Ge81CoIDYQrXmIxpFumJBu5MtZpnQJQ==",
++      "cpu": [
++        "mips64el"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-ppc64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/linux-ppc64/-/linux-ppc64-0.28.1.tgz",
++      "integrity": "sha512-slScBsMAb3GFDcdrCgLwZtPYRoH2H/youv10QiZyRjmsP48fznoveWytSgCI/R0ZcUgpc0ZhIUEx6LHts8yrfQ==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-riscv64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/linux-riscv64/-/linux-riscv64-0.28.1.tgz",
++      "integrity": "sha512-kw0owk1o0GFETUJyW0jc0G4Yzs0BHZn0JDZ8JRT088vjJYX777BAs1fDGxAC+q831qOs2DTC96mNsG2opdfyyQ==",
++      "cpu": [
++        "riscv64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-s390x": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/linux-s390x/-/linux-s390x-0.28.1.tgz",
++      "integrity": "sha512-/lAIjX8aYFRByhh6L5rYtPEDRqa9de/4V/juOXcta5frjvzXO4/sqEtyytse0g3zZFuWu5cDN0MkLz2qRDD2Ag==",
++      "cpu": [
++        "s390x"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/linux-x64/-/linux-x64-0.28.1.tgz",
++      "integrity": "sha512-u/anNYF2mmVOEDwLtnQ1wOr3EZ9sTNGLWrsYGYwHWzGA3Si84IOkHXlbWTD1NB+9/1lcnweYKO54uhxZydNzfA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/netbsd-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/netbsd-arm64/-/netbsd-arm64-0.28.1.tgz",
++      "integrity": "sha512-oks0DYbLwWMmaakTsCb+zL4E+aHRVLom9IJZOAthMQEPiQmydXHkziYEsGYRx0uNV/IjEKGAV941JzH02pflqw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "netbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/netbsd-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/netbsd-x64/-/netbsd-x64-0.28.1.tgz",
++      "integrity": "sha512-aeL6lAnN89Hz43Mlh1G8ARasbuoYvSITDEx0tHh5b7jJnHcssqgjy9Yx430GDpmCa6OyrKoS0aNRjKundRizGg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "netbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/openbsd-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/openbsd-arm64/-/openbsd-arm64-0.28.1.tgz",
++      "integrity": "sha512-MEFJe5C3R8pwXdZ5Y21oo6m7ePiS0d9pWucn99O/wvyJZChoIQKrQDxKrGeW8F5+T0okTHesAmDeiHDTIq0V/Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "openbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/openbsd-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/openbsd-x64/-/openbsd-x64-0.28.1.tgz",
++      "integrity": "sha512-i/ZLIOafE0Z8cI/XANJAixoJL/uRAoS2xOA3rb0xN+KK0K177cMAsQYkzHtBrtMXAKuAc7HGgcWiZ/sRC1Nxgw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "openbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/openharmony-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/openharmony-arm64/-/openharmony-arm64-0.28.1.tgz",
++      "integrity": "sha512-ge+Z7EXFNt2BO1oAMsVpiQ8EwndV9i1xXerAeTIK7AtPs3bKFXQM7nlRxDSIUIMeueR1CNXxqztLzdNeReKBJg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "openharmony"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/sunos-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/sunos-x64/-/sunos-x64-0.28.1.tgz",
++      "integrity": "sha512-BEjgtECkL3vY+SaSQ6nzVfiALUeFxpawyp8Jmf5PtYhf1Ug40N1h/hxlhts+f1FvSvarEigdxS3BlSMI2PJLcQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "sunos"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/win32-arm64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/win32-arm64/-/win32-arm64-0.28.1.tgz",
++      "integrity": "sha512-lCv9eK/H6ZJWbE7bh2nw54CZ9M2nupBxJcTsdk/QQnWkdSjKGuxmmH8/GWrlT1eMmZfn4dGcCjRte397WqfQXA==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/win32-ia32": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/win32-ia32/-/win32-ia32-0.28.1.tgz",
++      "integrity": "sha512-zvb/mB2bSCoJOpoCBgYKKpX6YM6mJBlBUVUtVj41DlZJVEB6/0CKlRYxP5wWl1C1ILiCoAU5wZZ4q1P3qeS6Eg==",
++      "cpu": [
++        "ia32"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/win32-x64": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/@esbuild/win32-x64/-/win32-x64-0.28.1.tgz",
++      "integrity": "sha512-bm4Mowrv+GXMlpWX++EcXw/iLyd1o3+bJkC2DkWXYVvgZCqD/bSj9ctZeAMC3cIxgjRVR2Dufaiu4YPxr5gW1A==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@img/colour": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmmirror.com/@img/colour/-/colour-1.1.0.tgz",
++      "integrity": "sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==",
++      "dev": true,
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@img/sharp-darwin-arm64": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-darwin-arm64/-/sharp-darwin-arm64-0.35.4.tgz",
++      "integrity": "sha512-Uhfl4V4lhP2nbUVF9+hyH1+luj86f1gUFeo8ALYxFoULoU+G87D43BfeMP8XHsk9boxAnCY/bf2EHwhA7MuGsA==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-darwin-arm64": "1.3.3"
++      }
++    },
++    "node_modules/@img/sharp-darwin-x64": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-darwin-x64/-/sharp-darwin-x64-0.35.4.tgz",
++      "integrity": "sha512-hWniXY3bG5qKpkKrAwPe4y+VTPmf086YQAnkxWh7uA1YrlRouWGa0M0Mxj3ZjnXFkv7/TD1bTy9lGUK26vRvWw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-darwin-x64": "1.3.3"
++      }
++    },
++    "node_modules/@img/sharp-freebsd-wasm32": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-freebsd-wasm32/-/sharp-freebsd-wasm32-0.35.4.tgz",
++      "integrity": "sha512-lIsKw/BU+kjB4eZjxrYrZmwOJYi3Ajrv66iAlBmUPyKc3HpnloevB1g3wxGD9P/5BbQ1brBGl65VRRrCvQDEqA==",
++      "dev": true,
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "dependencies": {
++        "@img/sharp-wasm32": "0.35.4"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-darwin-arm64": {
++      "version": "1.3.3",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-libvips-darwin-arm64/-/sharp-libvips-darwin-arm64-1.3.3.tgz",
++      "integrity": "sha512-suTBPTDGrI9WodccaDdwZItTSaBYASlBk1NSfElSHrUfzu3szG6lvIF58+WiFvnfzuK8ZBFS5zE00PxqxnRiPg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-darwin-x64": {
++      "version": "1.3.3",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-libvips-darwin-x64/-/sharp-libvips-darwin-x64-1.3.3.tgz",
++      "integrity": "sha512-FVJZ5mITMobmXIz/hPDTw0EintTW5H3WfrxwLqEqjiIihlu+hVRyGrFQ60xl0Lxn7Bt3zdpevPaQi0HEzqz9fw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-arm": {
++      "version": "1.3.3",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-libvips-linux-arm/-/sharp-libvips-linux-arm-1.3.3.tgz",
++      "integrity": "sha512-3rbU4vqXXc3hY/OiXdl52xZvT0F1yEngWfvqudtPJg/KkyiaQw2DRsFrNzpmLvfavbwOq3qXn36GP8obHRULQA==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-arm64": {
++      "version": "1.3.3",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-libvips-linux-arm64/-/sharp-libvips-linux-arm64-1.3.3.tgz",
++      "integrity": "sha512-0DaL0A6Xu6sQSQFwe4iVCrKWU2cCTItnRsYsCdxAMm9NF6twAA9BKnoqy4hqz4+azQ0JHuA26qiUKsf1XJ/v5A==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-ppc64": {
++      "version": "1.3.3",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-libvips-linux-ppc64/-/sharp-libvips-linux-ppc64-1.3.3.tgz",
++      "integrity": "sha512-cdn1OvUBwsXhbC0zSzJnNzf5MZ/mTrobawDvNXBTxe8VtqKAm0sRuEY2Evzovb/w9JMk4TvRxqt1mekSuJz64w==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-riscv64": {
++      "version": "1.3.3",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-libvips-linux-riscv64/-/sharp-libvips-linux-riscv64-1.3.3.tgz",
++      "integrity": "sha512-HjPVx7yKz+0lqdhDlTw1tt90wamBoxhiXpvl1XZpJLiHH4RCJ5yDTqH+VlYPv2fwFs89JFw4c1IexYOcQUi4IQ==",
++      "cpu": [
++        "riscv64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-s390x": {
++      "version": "1.3.3",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-libvips-linux-s390x/-/sharp-libvips-linux-s390x-1.3.3.tgz",
++      "integrity": "sha512-neWLh+3yCNThxnfy3c4BbVBeGgt9aftno+XbT56iK28RgeDs3UOFWviLWlUu0bArYVYJaFDK+RRohbicUNCm8Q==",
++      "cpu": [
++        "s390x"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-x64": {
++      "version": "1.3.3",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-libvips-linux-x64/-/sharp-libvips-linux-x64-1.3.3.tgz",
++      "integrity": "sha512-4vKmvAst9nrowcqquKFAyZJUDolUaIp8uRiN0mWFguJ1IplC9/pitXtlnnlU4aa/eJw3J7i67V+pwUL+wZGdsA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linuxmusl-arm64": {
++      "version": "1.3.3",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-libvips-linuxmusl-arm64/-/sharp-libvips-linuxmusl-arm64-1.3.3.tgz",
++      "integrity": "sha512-Y9kQaLMuNoB0bPYOOdcZMaseNrFpPodIWWMrx+CZyydf2xn68j9WYc6sWWRrDwNkzCQjKYfc68L7jKjGlHMibw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linuxmusl-x64": {
++      "version": "1.3.3",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-libvips-linuxmusl-x64/-/sharp-libvips-linuxmusl-x64-1.3.3.tgz",
++      "integrity": "sha512-fj8Mv0HHfD1Rr+4I68+3agJynxDWtBFgicTbSOb9Bke6pIwzGcJ+RX/yHjmiEGFMCavY/dxvem7MyNaJF+wDiw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-linux-arm": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-linux-arm/-/sharp-linux-arm-0.35.4.tgz",
++      "integrity": "sha512-7OAS8gI0EReKGVN2HssHlM6umJgxF5VI3xN0p9FA91p/YO+ou5hiNghLdZ5BEHztwaaK5+bLKRf8x/o2L2nk9A==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-arm": "1.3.3"
++      }
++    },
++    "node_modules/@img/sharp-linux-arm64": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-linux-arm64/-/sharp-linux-arm64-0.35.4.tgz",
++      "integrity": "sha512-De4jpEnAU8Hd5oT0j1G3uL4ZvTuipVMn7YC6vPaJhy6/7EwEae0SVAoBrUMYQbkLGDm85taVWwuPc1a44LTzCQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-arm64": "1.3.3"
++      }
++    },
++    "node_modules/@img/sharp-linux-ppc64": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-linux-ppc64/-/sharp-linux-ppc64-0.35.4.tgz",
++      "integrity": "sha512-2oYZJeIl4kCcMGk4ouZVjnkCtFrpQFlNEtJ6GbxzhHQchwH0NH/qEb9ykmOl29dqwMq+JhFdZn+1ak2FKhI9fQ==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-ppc64": "1.3.3"
++      }
++    },
++    "node_modules/@img/sharp-linux-riscv64": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-linux-riscv64/-/sharp-linux-riscv64-0.35.4.tgz",
++      "integrity": "sha512-cPbNChoRURAWdebDIHSenxRpgEdy7JkPydSnUxRm9VvKD7m0/xVaR/8Fzlu81pk5nHEvHH87UZUA7cTtwnbJSA==",
++      "cpu": [
++        "riscv64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-riscv64": "1.3.3"
++      }
++    },
++    "node_modules/@img/sharp-linux-s390x": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-linux-s390x/-/sharp-linux-s390x-0.35.4.tgz",
++      "integrity": "sha512-RY0JFY8Fd6RonCBtHz+DvadaPkXDSI1AUn6yWL9TipqkZ1vY8w8evqdgyDFnkm4/K1ve1TvZiaePP5oSd4+WVQ==",
++      "cpu": [
++        "s390x"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-s390x": "1.3.3"
++      }
++    },
++    "node_modules/@img/sharp-linux-x64": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-linux-x64/-/sharp-linux-x64-0.35.4.tgz",
++      "integrity": "sha512-9qvvEAuk8k89TfWUoX2htWjbAMX8p+NxCppjpcg5k6xMsjhBQPTsoIh36h9Qde4WRuGpJeYnOjdosDn/cnv+OA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-x64": "1.3.3"
++      }
++    },
++    "node_modules/@img/sharp-linuxmusl-arm64": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-linuxmusl-arm64/-/sharp-linuxmusl-arm64-0.35.4.tgz",
++      "integrity": "sha512-KB5jxpfWQTr0nc3xdHtWChdbifHrBGsd2SM62Eyxrl8afikm+f5qGBU75SJIZBT/S1MC8XyacdlXBMSWq6OURA==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linuxmusl-arm64": "1.3.3"
++      }
++    },
++    "node_modules/@img/sharp-linuxmusl-x64": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-linuxmusl-x64/-/sharp-linuxmusl-x64-0.35.4.tgz",
++      "integrity": "sha512-f+eZJZIQNEEd26RPSW+76chwOf1XtA2Y/O+5ocVyLliHkeih3e+jhLVBdNTd2rS3IbNXK8+ug93Vf5ZXtF5Lxg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linuxmusl-x64": "1.3.3"
++      }
++    },
++    "node_modules/@img/sharp-wasm32": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-wasm32/-/sharp-wasm32-0.35.4.tgz",
++      "integrity": "sha512-zQnl4Kwp7Q6NHsENtU2T/00Zi+w3AQNwz3+UaTyVBy2FpXrzXzGjndpK61onhZjRtRpQXxCTeqw19bVyXOh7jA==",
++      "dev": true,
++      "optional": true,
++      "dependencies": {
++        "@emnapi/runtime": "^1.11.3"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-webcontainers-wasm32": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-webcontainers-wasm32/-/sharp-webcontainers-wasm32-0.35.4.tgz",
++      "integrity": "sha512-ESfNkywmCfPNyaZjxooddJQiQ+l/nTpGEOGthxiLnIHXC/CmcBixnfwUleX9mCz9ovrUUvKMap/pm8RYbzfwaA==",
++      "cpu": [
++        "wasm32"
++      ],
++      "dev": true,
++      "optional": true,
++      "dependencies": {
++        "@img/sharp-wasm32": "0.35.4"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-win32-arm64": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-win32-arm64/-/sharp-win32-arm64-0.35.4.tgz",
++      "integrity": "sha512-iNdlBX9gLVvqe2I3uIJSIKTq6wckP/DYxZtcqxm09x5Gi24DnFBmPAWZmr60ZyYMG0xlzo6goG3670ar+RXvRw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-win32-ia32": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-win32-ia32/-/sharp-win32-ia32-0.35.4.tgz",
++      "integrity": "sha512-kqRsbaa5CS6KHlpxnN7WhE6vAAugXyZButpRdvDWetlv6Qv4N9WTcrWzF7tXfB9T7MsoadqdI8hmwLq6UlLvtw==",
++      "cpu": [
++        "ia32"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": "^20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-win32-x64": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/@img/sharp-win32-x64/-/sharp-win32-x64-0.35.4.tgz",
++      "integrity": "sha512-XtmnYhBcrORsJ4XJngyzr/EWP0hRZLAZRFaApdKuviyqF78+ylxh2y06ZmtULAMOnObJ3ucpN0AcwSWnMowTRg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmmirror.com/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmmirror.com/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.9",
++      "resolved": "https://registry.npmmirror.com/@jridgewell/trace-mapping/-/trace-mapping-0.3.9.tgz",
++      "integrity": "sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ==",
++      "dev": true,
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.0.3",
++        "@jridgewell/sourcemap-codec": "^1.4.10"
++      }
++    },
++    "node_modules/@poppinss/colors": {
++      "version": "4.1.6",
++      "resolved": "https://registry.npmmirror.com/@poppinss/colors/-/colors-4.1.6.tgz",
++      "integrity": "sha512-H9xkIdFswbS8n1d6vmRd8+c10t2Qe+rZITbbDHHkQixH5+2x1FDGmi/0K+WgWiqQFKPSlIYB7jlH6Kpfn6Fleg==",
++      "dev": true,
++      "dependencies": {
++        "kleur": "^4.1.5"
++      }
++    },
++    "node_modules/@poppinss/dumper": {
++      "version": "0.6.5",
++      "resolved": "https://registry.npmmirror.com/@poppinss/dumper/-/dumper-0.6.5.tgz",
++      "integrity": "sha512-NBdYIb90J7LfOI32dOewKI1r7wnkiH6m920puQ3qHUeZkxNkQiFnXVWoE6YtFSv6QOiPPf7ys6i+HWWecDz7sw==",
++      "dev": true,
++      "dependencies": {
++        "@poppinss/colors": "^4.1.5",
++        "@sindresorhus/is": "^7.0.2",
++        "supports-color": "^10.0.0"
++      }
++    },
++    "node_modules/@poppinss/exception": {
++      "version": "1.2.3",
++      "resolved": "https://registry.npmmirror.com/@poppinss/exception/-/exception-1.2.3.tgz",
++      "integrity": "sha512-dCED+QRChTVatE9ibtoaxc+WkdzOSjYTKi/+uacHWIsfodVfpsueo3+DKpgU5Px8qXjgmXkSvhXvSCz3fnP9lw==",
++      "dev": true
++    },
++    "node_modules/@sindresorhus/is": {
++      "version": "7.2.0",
++      "resolved": "https://registry.npmmirror.com/@sindresorhus/is/-/is-7.2.0.tgz",
++      "integrity": "sha512-P1Cz1dWaFfR4IR+U13mqqiGsLFf1KbayybWwdd2vfctdV6hDpUkgCY0nKOLLTMSoRd/jJNjtbqzf13K8DCCXQw==",
++      "dev": true,
++      "engines": {
++        "node": ">=18"
++      },
++      "funding": {
++        "url": "https://github.com/sindresorhus/is?sponsor=1"
++      }
++    },
++    "node_modules/@speed-highlight/core": {
++      "version": "1.2.24",
++      "resolved": "https://registry.npmmirror.com/@speed-highlight/core/-/core-1.2.24.tgz",
++      "integrity": "sha512-qeW2e1l78afw8VhRPfPQ1Gjj+KU5XFQ/OFV5ti6eTa9bruO7mJyZtA4vw0ofqmA3tKCkROE9xLk3VZoeRc98nw==",
++      "dev": true
++    },
++    "node_modules/blake3-wasm": {
++      "version": "2.1.5",
++      "resolved": "https://registry.npmmirror.com/blake3-wasm/-/blake3-wasm-2.1.5.tgz",
++      "integrity": "sha512-F1+K8EbfOZE49dtoPtmxUQrpXaBIl3ICvasLh+nJta0xkz+9kF/7uet9fLnwKqhDrmj6g+6K3Tw9yQPUg2ka5g==",
++      "dev": true
++    },
++    "node_modules/cookie": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmmirror.com/cookie/-/cookie-1.1.1.tgz",
++      "integrity": "sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==",
++      "dev": true,
++      "engines": {
++        "node": ">=18"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/express"
++      }
++    },
++    "node_modules/detect-libc": {
++      "version": "2.1.2",
++      "resolved": "https://registry.npmmirror.com/detect-libc/-/detect-libc-2.1.2.tgz",
++      "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
++      "dev": true,
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/error-stack-parser-es": {
++      "version": "1.0.5",
++      "resolved": "https://registry.npmmirror.com/error-stack-parser-es/-/error-stack-parser-es-1.0.5.tgz",
++      "integrity": "sha512-5qucVt2XcuGMcEGgWI7i+yZpmpByQ8J1lHhcL7PwqCwu9FPP3VUXzT4ltHe5i2z9dePwEHcDVOAfSnHsOlCXRA==",
++      "dev": true,
++      "funding": {
++        "url": "https://github.com/sponsors/antfu"
++      }
++    },
++    "node_modules/esbuild": {
++      "version": "0.28.1",
++      "resolved": "https://registry.npmmirror.com/esbuild/-/esbuild-0.28.1.tgz",
++      "integrity": "sha512-HrJrvZv5ayxBzPfwphOoNzkzOIIlifzk0KJrGK2c8R4+LKpMtpYLQeUdjnwjWv/LZlkH2laZk+4w78pi99D4Vw==",
++      "dev": true,
++      "hasInstallScript": true,
++      "bin": {
++        "esbuild": "bin/esbuild"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "optionalDependencies": {
++        "@esbuild/aix-ppc64": "0.28.1",
++        "@esbuild/android-arm": "0.28.1",
++        "@esbuild/android-arm64": "0.28.1",
++        "@esbuild/android-x64": "0.28.1",
++        "@esbuild/darwin-arm64": "0.28.1",
++        "@esbuild/darwin-x64": "0.28.1",
++        "@esbuild/freebsd-arm64": "0.28.1",
++        "@esbuild/freebsd-x64": "0.28.1",
++        "@esbuild/linux-arm": "0.28.1",
++        "@esbuild/linux-arm64": "0.28.1",
++        "@esbuild/linux-ia32": "0.28.1",
++        "@esbuild/linux-loong64": "0.28.1",
++        "@esbuild/linux-mips64el": "0.28.1",
++        "@esbuild/linux-ppc64": "0.28.1",
++        "@esbuild/linux-riscv64": "0.28.1",
++        "@esbuild/linux-s390x": "0.28.1",
++        "@esbuild/linux-x64": "0.28.1",
++        "@esbuild/netbsd-arm64": "0.28.1",
++        "@esbuild/netbsd-x64": "0.28.1",
++        "@esbuild/openbsd-arm64": "0.28.1",
++        "@esbuild/openbsd-x64": "0.28.1",
++        "@esbuild/openharmony-arm64": "0.28.1",
++        "@esbuild/sunos-x64": "0.28.1",
++        "@esbuild/win32-arm64": "0.28.1",
++        "@esbuild/win32-ia32": "0.28.1",
++        "@esbuild/win32-x64": "0.28.1"
++      }
++    },
++    "node_modules/fsevents": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmmirror.com/fsevents/-/fsevents-2.3.3.tgz",
++      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
++      "dev": true,
++      "hasInstallScript": true,
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
++      }
++    },
++    "node_modules/kleur": {
++      "version": "4.1.5",
++      "resolved": "https://registry.npmmirror.com/kleur/-/kleur-4.1.5.tgz",
++      "integrity": "sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ==",
++      "dev": true,
++      "engines": {
++        "node": ">=6"
++      }
++    },
++    "node_modules/miniflare": {
++      "version": "5.20261001.0-alpha",
++      "resolved": "https://registry.npmmirror.com/miniflare/-/miniflare-5.20261001.0-alpha.tgz",
++      "integrity": "sha512-GaimS5mSIOMyvd16ga+e1/QkI8cmp3z35QPHFex0DktqNQf2RVZQwMPQXdyoUreUiFP/0Gpe2MoQInTyMAD5xA==",
++      "dev": true,
++      "dependencies": {
++        "@cspotcode/source-map-support": "0.8.1",
++        "sharp": "0.35.4",
++        "undici": "7.29.1",
++        "workerd": "1.20261001.1",
++        "ws": "8.21.0",
++        "youch": "4.1.0-beta.10"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/path-to-regexp": {
++      "version": "6.3.0",
++      "resolved": "https://registry.npmmirror.com/path-to-regexp/-/path-to-regexp-6.3.0.tgz",
++      "integrity": "sha512-Yhpw4T9C6hPpgPeA28us07OJeqZ5EzQTkbfwuhsUg0c237RomFoETJgmp2sa3F/41gfLE6G5cqcYwznmeEeOlQ==",
++      "dev": true
++    },
++    "node_modules/pathe": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmmirror.com/pathe/-/pathe-2.0.3.tgz",
++      "integrity": "sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==",
++      "dev": true
++    },
++    "node_modules/semver": {
++      "version": "7.8.5",
++      "resolved": "https://registry.npmmirror.com/semver/-/semver-7.8.5.tgz",
++      "integrity": "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==",
++      "dev": true,
++      "bin": {
++        "semver": "bin/semver.js"
++      },
++      "engines": {
++        "node": ">=10"
++      }
++    },
++    "node_modules/sharp": {
++      "version": "0.35.4",
++      "resolved": "https://registry.npmmirror.com/sharp/-/sharp-0.35.4.tgz",
++      "integrity": "sha512-n++8XWcj+jCOr2IOl7h8LbKnGBDY4aPbmprMONBNFdn0ImXqpGVv5zliDs0V9HbmbCQLpbuo2ej9rAoOQTvMDA==",
++      "dev": true,
++      "dependencies": {
++        "@img/colour": "^1.1.0",
++        "detect-libc": "^2.1.2",
++        "semver": "^7.8.5"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-darwin-arm64": "0.35.4",
++        "@img/sharp-darwin-x64": "0.35.4",
++        "@img/sharp-freebsd-wasm32": "0.35.4",
++        "@img/sharp-libvips-darwin-arm64": "1.3.3",
++        "@img/sharp-libvips-darwin-x64": "1.3.3",
++        "@img/sharp-libvips-linux-arm": "1.3.3",
++        "@img/sharp-libvips-linux-arm64": "1.3.3",
++        "@img/sharp-libvips-linux-ppc64": "1.3.3",
++        "@img/sharp-libvips-linux-riscv64": "1.3.3",
++        "@img/sharp-libvips-linux-s390x": "1.3.3",
++        "@img/sharp-libvips-linux-x64": "1.3.3",
++        "@img/sharp-libvips-linuxmusl-arm64": "1.3.3",
++        "@img/sharp-libvips-linuxmusl-x64": "1.3.3",
++        "@img/sharp-linux-arm": "0.35.4",
++        "@img/sharp-linux-arm64": "0.35.4",
++        "@img/sharp-linux-ppc64": "0.35.4",
++        "@img/sharp-linux-riscv64": "0.35.4",
++        "@img/sharp-linux-s390x": "0.35.4",
++        "@img/sharp-linux-x64": "0.35.4",
++        "@img/sharp-linuxmusl-arm64": "0.35.4",
++        "@img/sharp-linuxmusl-x64": "0.35.4",
++        "@img/sharp-webcontainers-wasm32": "0.35.4",
++        "@img/sharp-win32-arm64": "0.35.4",
++        "@img/sharp-win32-ia32": "0.35.4",
++        "@img/sharp-win32-x64": "0.35.4"
++      },
++      "peerDependenciesMeta": {
++        "@types/node": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/supports-color": {
++      "version": "10.2.2",
++      "resolved": "https://registry.npmmirror.com/supports-color/-/supports-color-10.2.2.tgz",
++      "integrity": "sha512-SS+jx45GF1QjgEXQx4NJZV9ImqmO2NPz5FNsIHrsDjh2YsHnawpan7SNQ1o8NuhrbHZy9AZhIoCUiCeaW/C80g==",
++      "dev": true,
++      "engines": {
++        "node": ">=18"
++      },
++      "funding": {
++        "url": "https://github.com/chalk/supports-color?sponsor=1"
++      }
++    },
++    "node_modules/tslib": {
++      "version": "2.8.1",
++      "resolved": "https://registry.npmmirror.com/tslib/-/tslib-2.8.1.tgz",
++      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
++      "dev": true,
++      "optional": true
++    },
++    "node_modules/undici": {
++      "version": "7.29.1",
++      "resolved": "https://registry.npmmirror.com/undici/-/undici-7.29.1.tgz",
++      "integrity": "sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==",
++      "dev": true,
++      "engines": {
++        "node": ">=20.18.1"
++      }
++    },
++    "node_modules/unenv": {
++      "version": "2.0.0-rc.24",
++      "resolved": "https://registry.npmmirror.com/unenv/-/unenv-2.0.0-rc.24.tgz",
++      "integrity": "sha512-i7qRCmY42zmCwnYlh9H2SvLEypEFGye5iRmEMKjcGi7zk9UquigRjFtTLz0TYqr0ZGLZhaMHl/foy1bZR+Cwlw==",
++      "dev": true,
++      "dependencies": {
++        "pathe": "^2.0.3"
++      }
++    },
++    "node_modules/workerd": {
++      "version": "1.20261001.1",
++      "resolved": "https://registry.npmmirror.com/workerd/-/workerd-1.20261001.1.tgz",
++      "integrity": "sha512-d/SIYHFO0PT/wiFZg8in4NpRIxYuFwslX1HdylOtWkBIIUmSpkGFhK820cV84XACFylwJ48xuRoWW/8DWDPsPQ==",
++      "dev": true,
++      "hasInstallScript": true,
++      "bin": {
++        "workerd": "bin/workerd"
++      },
++      "engines": {
++        "node": ">=16"
++      },
++      "optionalDependencies": {
++        "@cloudflare/workerd-darwin-64": "1.20261001.1",
++        "@cloudflare/workerd-darwin-arm64": "1.20261001.1",
++        "@cloudflare/workerd-linux-64": "1.20261001.1",
++        "@cloudflare/workerd-linux-arm64": "1.20261001.1",
++        "@cloudflare/workerd-windows-64": "1.20261001.1"
++      }
++    },
++    "node_modules/wrangler": {
++      "version": "4.146.0",
++      "resolved": "https://registry.npmmirror.com/wrangler/-/wrangler-4.146.0.tgz",
++      "integrity": "sha512-c27eHUH0Isr8HTmgZ6cLtLr/0cxtiBoLren6ywBeTW8ZIzj/dINVNBcqsbZc+iETnI5jrzO7E7Z8mLgLZ/l9iw==",
++      "dev": true,
++      "dependencies": {
++        "@cloudflare/kv-asset-handler": "0.5.0",
++        "@cloudflare/unenv-preset": "2.16.2",
++        "blake3-wasm": "2.1.5",
++        "esbuild": "0.28.1",
++        "miniflare": "5.20261001.0-alpha",
++        "path-to-regexp": "6.3.0",
++        "unenv": "2.0.0-rc.24",
++        "workerd": "1.20261001.1"
++      },
++      "bin": {
++        "cf-wrangler": "bin/cf-wrangler.js",
++        "wrangler": "bin/wrangler.js",
++        "wrangler2": "bin/wrangler.js"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      },
++      "optionalDependencies": {
++        "fsevents": "2.3.3"
++      },
++      "peerDependencies": {
++        "@cloudflare/workers-types": "^5.20261001.1"
++      },
++      "peerDependenciesMeta": {
++        "@cloudflare/workers-types": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/ws": {
++      "version": "8.21.0",
++      "resolved": "https://registry.npmmirror.com/ws/-/ws-8.21.0.tgz",
++      "integrity": "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==",
++      "dev": true,
++      "engines": {
++        "node": ">=10.0.0"
++      },
++      "peerDependencies": {
++        "bufferutil": "^4.0.1",
++        "utf-8-validate": ">=5.0.2"
++      },
++      "peerDependenciesMeta": {
++        "bufferutil": {
++          "optional": true
++        },
++        "utf-8-validate": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/youch": {
++      "version": "4.1.0-beta.10",
++      "resolved": "https://registry.npmmirror.com/youch/-/youch-4.1.0-beta.10.tgz",
++      "integrity": "sha512-rLfVLB4FgQneDr0dv1oddCVZmKjcJ6yX6mS4pU82Mq/Dt9a3cLZQ62pDBL4AUO+uVrCvtWz3ZFUL2HFAFJ/BXQ==",
++      "dev": true,
++      "dependencies": {
++        "@poppinss/colors": "^4.1.5",
++        "@poppinss/dumper": "^0.6.4",
++        "@speed-highlight/core": "^1.2.7",
++        "cookie": "^1.0.2",
++        "youch-core": "^0.3.3"
++      }
++    },
++    "node_modules/youch-core": {
++      "version": "0.3.3",
++      "resolved": "https://registry.npmmirror.com/youch-core/-/youch-core-0.3.3.tgz",
++      "integrity": "sha512-ho7XuGjLaJ2hWHoK8yFnsUGy2Y5uDpqSTq1FkHLK4/oqKtyUU1AFbOOxY4IpC9f0fTLjwYbslUz0Po5BpD1wrA==",
++      "dev": true,
++      "dependencies": {
++        "@poppinss/exception": "^1.2.2",
++        "error-stack-parser-es": "^1.0.5"
++      }
++    }
++  }
++}
+diff --git a/package.json b/package.json
+new file mode 100644
+index 0000000..22715fe
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,11 @@
++{
++  "name": "wxpush-hardened",
++  "private": true,
++  "type": "module",
++  "scripts": {
++    "test": "node --test test/*.test.js"
++  },
++  "devDependencies": {
++    "wrangler": "^4.42.0"
++  }
++}
+diff --git a/rollback.sh b/rollback.sh
+new file mode 100755
+index 0000000..031dcf9
+--- /dev/null
++++ b/rollback.sh
+@@ -0,0 +1,22 @@
++#!/bin/sh
++set -eu
++
++BASE=52e2051a93e6042bc7155065cc12dd3c64d0d70f
++REPO=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++DEST=${1:-}
++
++if [ -z "$DEST" ] || [ -e "$DEST" ]; then
++  printf '%s\n' 'Usage: ./rollback.sh /path/to/new-empty-destination' >&2
++  exit 2
++fi
++
++mkdir -p -- "$DEST"
++git -C "$REPO" archive "$BASE" | tar -x -C "$DEST"
++ACTUAL=$(shasum -a 256 "$DEST/src/index.js" | awk '{print $1}')
++EXPECTED=795aba8d9fcb72d7f379118850dc300257ed37650a529393c07c03876e20a4fe
++if [ "$ACTUAL" != "$EXPECTED" ]; then
++  printf '%s\n' 'Rollback verification failed: source hash mismatch' >&2
++  exit 1
++fi
++printf 'Restored upstream %s into %s\n' "$BASE" "$DEST"
++printf 'Verified src/index.js SHA-256: %s\n' "$ACTUAL"
+diff --git a/scripts/send.mjs b/scripts/send.mjs
+new file mode 100644
+index 0000000..ed3505a
+--- /dev/null
++++ b/scripts/send.mjs
+@@ -0,0 +1,37 @@
++const names = ['WX_CF_ACCESS_CLIENT_ID', 'WX_CF_ACCESS_CLIENT_SECRET', 'WX_API_TOKEN'];
++if (names.some(name => !process.env[name])) {
++  console.error('Missing required credential environment variables');
++  process.exit(2);
++}
++
++const chunks = [];
++let size = 0;
++for await (const chunk of process.stdin) {
++  size += chunk.length;
++  if (size > 16 * 1024) {
++    console.error('Request exceeds 16 KiB');
++    process.exit(2);
++  }
++  chunks.push(chunk);
++}
++
++const body = Buffer.concat(chunks).toString('utf8');
++try {
++  JSON.parse(body);
++  const response = await fetch('https://push-api.matrixsku.com/wxsend', {
++    method: 'POST',
++    headers: {
++      'CF-Access-Client-Id': process.env.WX_CF_ACCESS_CLIENT_ID,
++      'CF-Access-Client-Secret': process.env.WX_CF_ACCESS_CLIENT_SECRET,
++      Authorization: `Bearer ${process.env.WX_API_TOKEN}`,
++      'Content-Type': 'application/json',
++    },
++    body,
++  });
++  console.log(`HTTP ${response.status}`);
++  console.log(await response.text());
++  if (!response.ok) process.exitCode = 1;
++} catch (error) {
++  console.error(error instanceof SyntaxError ? 'Invalid JSON input' : 'Request failed');
++  process.exitCode = 1;
++}
+diff --git a/src/api.js b/src/api.js
+new file mode 100644
+index 0000000..2455ab2
+--- /dev/null
++++ b/src/api.js
+@@ -0,0 +1,209 @@
++import { DETAIL_TTL_SECONDS, configuredRecipients, jsonResponse, randomId } from './common.js';
++
++const MAX_BODY_BYTES = 16 * 1024;
++const MAX_TITLE_CHARS = 80;
++const MAX_CONTENT_CHARS = 8000;
++const WEEKLY_CRON = '0 2 * * MON';
++const CLEANUP_CRON = '0 * * * *';
++
++async function constantTimeEquals(left, right) {
++  const encoder = new TextEncoder();
++  const [a, b] = await Promise.all([
++    crypto.subtle.digest('SHA-256', encoder.encode(left)),
++    crypto.subtle.digest('SHA-256', encoder.encode(right)),
++  ]);
++  const av = new Uint8Array(a);
++  const bv = new Uint8Array(b);
++  let mismatch = 0;
++  for (let i = 0; i < av.length; i++) mismatch |= av[i] ^ bv[i];
++  return mismatch === 0;
++}
++
++async function authorized(request, env) {
++  const match = /^Bearer ([^\s]+)$/.exec(request.headers.get('Authorization') || '');
++  return Boolean(env.API_TOKEN && match && await constantTimeEquals(match[1], env.API_TOKEN));
++}
++
++async function readLimitedText(body, limit) {
++  if (!body) return '';
++  const reader = body.getReader();
++  const chunks = [];
++  let size = 0;
++  try {
++    while (true) {
++      const { done, value } = await reader.read();
++      if (done) break;
++      size += value.byteLength;
++      if (size > limit) {
++        await reader.cancel();
++        throw new Error('body_too_large');
++      }
++      chunks.push(value);
++    }
++  } finally {
++    reader.releaseLock();
++  }
++  const bytes = new Uint8Array(size);
++  let offset = 0;
++  for (const chunk of chunks) {
++    bytes.set(chunk, offset);
++    offset += chunk.byteLength;
++  }
++  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
++}
++
++function parseMessage(text, allowedRecipients) {
++  const body = JSON.parse(text);
++  if (!body || Array.isArray(body) || typeof body !== 'object' ||
++      Object.keys(body).some(key => !['title', 'content', 'recipients'].includes(key))) {
++    throw new Error('invalid_body');
++  }
++  const { title, content } = body;
++  if (typeof title !== 'string' || typeof content !== 'string' ||
++      !title.trim() || !content.trim() ||
++      [...title].length > MAX_TITLE_CHARS || [...content].length > MAX_CONTENT_CHARS) {
++    throw new Error('invalid_message');
++  }
++  let recipients = allowedRecipients;
++  if (body.recipients !== undefined) {
++    if (!Array.isArray(body.recipients) || body.recipients.length < 1 ||
++        body.recipients.length > allowedRecipients.length ||
++        body.recipients.some(value => typeof value !== 'string' || !allowedRecipients.includes(value)) ||
++        new Set(body.recipients).size !== body.recipients.length) {
++      throw new Error('invalid_recipients');
++    }
++    recipients = body.recipients;
++  }
++  return { title: title.trim(), content: content.trim(), recipients };
++}
++
++async function wechatJson(url, payload) {
++  const response = await fetch(url, {
++    method: 'POST',
++    headers: { 'Content-Type': 'application/json; charset=utf-8' },
++    body: JSON.stringify(payload),
++  });
++  if (!response.ok) throw new Error('wechat_http_error');
++  return JSON.parse(await readLimitedText(response.body, 16 * 1024));
++}
++
++async function wechatToken(env) {
++  const data = await wechatJson('https://api.weixin.qq.com/cgi-bin/stable_token', {
++    grant_type: 'client_credential',
++    appid: env.WX_APPID,
++    secret: env.WX_SECRET,
++    force_refresh: false,
++  });
++  if (typeof data.access_token !== 'string' || !data.access_token) {
++    throw new Error(`wechat_token_${Number(data.errcode) || 'unknown'}`);
++  }
++  return data.access_token;
++}
++
++async function sendMessage(env, token, recipient, title, summary, detailUrl) {
++  const data = await wechatJson(
++    `https://api.weixin.qq.com/cgi-bin/message/template/send?access_token=${encodeURIComponent(token)}`,
++    {
++      touser: recipient,
++      template_id: env.WX_TEMPLATE_ID,
++      url: detailUrl,
++      data: { title: { value: title }, content: { value: summary } },
++    },
++  );
++  return { ok: data.errcode === 0, code: Number(data.errcode) || 0 };
++}
++
++function origin(env) {
++  const url = new URL(env.VIEW_ORIGIN);
++  if (url.protocol !== 'https:' || url.pathname !== '/' || url.search || url.hash ||
++      url.hostname !== 'push.matrixsku.com') {
++    throw new Error('invalid_view_origin');
++  }
++  return url.origin;
++}
++
++function ready(env) {
++  return Boolean(env.DB && env.API_TOKEN && env.WX_APPID && env.WX_SECRET &&
++    env.WX_USERID && env.WX_TEMPLATE_ID && env.VIEW_ORIGIN && env.API_HOST);
++}
++
++async function deliver(env, message, now) {
++  const detailOrigin = origin(env);
++  const id = randomId();
++  const expiresAt = now + DETAIL_TTL_SECONDS;
++  await env.DB.prepare(
++    'INSERT INTO messages (id, title, content, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
++  ).bind(id, message.title, message.content, now, expiresAt).run();
++
++  const token = await wechatToken(env);
++  const detailUrl = `${detailOrigin}/m/${id}`;
++  const summary = [...message.content.replace(/\s+/g, ' ')].slice(0, 180).join('');
++  const results = await Promise.allSettled(message.recipients.map(recipient =>
++    sendMessage(env, token, recipient, message.title, summary, detailUrl)));
++  const succeeded = results.filter(result => result.status === 'fulfilled' && result.value.ok).length;
++  const failed = results.length - succeeded;
++  console.log(JSON.stringify({ event: 'wechat_delivery', succeeded, failed }));
++  return { id, expiresAt, succeeded, failed };
++}
++
++export default {
++  async fetch(request, env) {
++    const url = new URL(request.url);
++    if (url.hostname !== env.API_HOST || url.protocol !== 'https:') {
++      return jsonResponse(404, { error: 'not_found' });
++    }
++    if (url.pathname !== '/wxsend') return jsonResponse(404, { error: 'not_found' });
++    if (request.method !== 'POST') {
++      return jsonResponse(405, { error: 'method_not_allowed' }, { Allow: 'POST' });
++    }
++    if (!ready(env)) return jsonResponse(503, { error: 'service_unavailable' });
++    if (!await authorized(request, env)) return jsonResponse(401, { error: 'unauthorized' });
++    if (url.search || request.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
++      return jsonResponse(400, { error: 'invalid_request' });
++    }
++    const declaredLength = Number(request.headers.get('Content-Length'));
++    if (declaredLength > MAX_BODY_BYTES) return jsonResponse(413, { error: 'body_too_large' });
++
++    let message;
++    try {
++      message = parseMessage(await readLimitedText(request.body, MAX_BODY_BYTES), configuredRecipients(env));
++    } catch (error) {
++      if (error.message === 'body_too_large') return jsonResponse(413, { error: 'body_too_large' });
++      if (error.message === 'invalid_recipient_configuration') return jsonResponse(503, { error: 'service_unavailable' });
++      return jsonResponse(400, { error: 'invalid_message' });
++    }
++
++    try {
++      const result = await deliver(env, message, Math.floor(Date.now() / 1000));
++      return jsonResponse(result.failed ? 502 : 200, {
++        id: result.id,
++        detail_url: `${origin(env)}/m/${result.id}`,
++        expires_at: result.expiresAt,
++        sent: result.succeeded,
++        failed: result.failed,
++      });
++    } catch (error) {
++      const type = error.message.startsWith('wechat_token_') ? error.message : 'internal';
++      console.error(JSON.stringify({ event: 'wechat_delivery_error', type }));
++      return jsonResponse(502, { error: 'delivery_failed' });
++    }
++  },
++
++  async scheduled(event, env) {
++    const now = Math.floor(Date.now() / 1000);
++    if (event.cron === CLEANUP_CRON) {
++      const result = await env.DB.prepare('DELETE FROM messages WHERE expires_at <= ?').bind(now).run();
++      console.log(JSON.stringify({ event: 'detail_cleanup', deleted: result.meta?.changes ?? 0 }));
++      return;
++    }
++    if (event.cron !== WEEKLY_CRON) throw new Error('unexpected_cron');
++    if (!ready(env)) throw new Error('service_unavailable');
++    const message = {
++      title: 'WXPush 保活',
++      content: '每周保活消息',
++      recipients: configuredRecipients(env),
++    };
++    const result = await deliver(env, message, now);
++    if (result.failed) throw new Error('keepalive_delivery_failed');
++  },
++};
+diff --git a/src/common.js b/src/common.js
+new file mode 100644
+index 0000000..ab275c9
+--- /dev/null
++++ b/src/common.js
+@@ -0,0 +1,37 @@
++export const DETAIL_TTL_SECONDS = 3 * 24 * 60 * 60;
++
++export function jsonResponse(status, body, extraHeaders = {}) {
++  return new Response(JSON.stringify(body), {
++    status,
++    headers: {
++      'Content-Type': 'application/json; charset=utf-8',
++      'Cache-Control': 'no-store',
++      'X-Content-Type-Options': 'nosniff',
++      ...extraHeaders,
++    },
++  });
++}
++
++export function escapeHtml(value) {
++  return value.replace(/[&<>"']/g, char => ({
++    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
++  })[char]);
++}
++
++export function randomId() {
++  const bytes = crypto.getRandomValues(new Uint8Array(24));
++  return btoa(String.fromCharCode(...bytes))
++    .replace(/\+/g, '-')
++    .replace(/\//g, '_')
++    .replace(/=+$/g, '');
++}
++
++export function configuredRecipients(env) {
++  const recipients = (env.WX_USERID || '').split('|').map(value => value.trim()).filter(Boolean);
++  if (recipients.length < 1 || recipients.length > 10 ||
++      recipients.some(value => value.length > 128) ||
++      new Set(recipients).size !== recipients.length) {
++    throw new Error('invalid_recipient_configuration');
++  }
++  return recipients;
++}
+diff --git a/src/index.js b/src/index.js
+deleted file mode 100644
+index 6186f09..0000000
+--- a/src/index.js
++++ /dev/null
+@@ -1,1003 +0,0 @@
+-// NEW: Helper function to extract parameters from any request type
+-async function getParams(request) {
+-  const { searchParams } = new URL(request.url);
+-  const urlParams = Object.fromEntries(searchParams.entries());
+-
+-  let bodyParams = {};
+-  // Only try to parse a body if it's a POST/PUT/PATCH request
+-  if (request.method === 'POST' || request.method === 'PUT' || request.method === 'PATCH') {
+-    const contentType = (request.headers.get('content-type') || '').toLowerCase();
+-    try {
+-      if (contentType.includes('application/json')) {
+-        const jsonBody = await request.json();
+-        // jsonBody can be a string, an object, or other types
+-        if (typeof jsonBody === 'string') {
+-          // treat raw string as content
+-          bodyParams = { content: jsonBody };
+-        } else if (jsonBody && typeof jsonBody === 'object') {
+-          // support nested containers like { params: {...} } or { data: {...} }
+-          if (jsonBody.params && typeof jsonBody.params === 'object') {
+-            bodyParams = jsonBody.params;
+-          } else if (jsonBody.data && typeof jsonBody.data === 'object') {
+-            bodyParams = jsonBody.data;
+-          } else {
+-            bodyParams = jsonBody;
+-          }
+-        }
+-      } else if (contentType.includes('application/x-www-form-urlencoded') || contentType.includes('multipart/form-data')) {
+-        const formData = await request.formData();
+-        bodyParams = Object.fromEntries(formData.entries());
+-      } else {
+-        // Fallback: try to read raw text and parse as JSON, otherwise treat as raw content
+-        const text = await request.text();
+-        if (text) {
+-          try {
+-            const parsed = JSON.parse(text);
+-            if (parsed && typeof parsed === 'object') {
+-              if (parsed.params && typeof parsed.params === 'object') {
+-                bodyParams = parsed.params;
+-              } else if (parsed.data && typeof parsed.data === 'object') {
+-                bodyParams = parsed.data;
+-              } else {
+-                bodyParams = parsed;
+-              }
+-            } else {
+-              bodyParams = { content: text };
+-            }
+-          } catch (e) {
+-            bodyParams = { content: text };
+-          }
+-        }
+-      }
+-    } catch (error) {
+-      console.error('Failed to parse request body:', error);
+-      // Ignore body parsing errors and proceed with URL params
+-    }
+-  }
+-
+-  // Merge params, giving body parameters precedence over URL parameters
+-  return { ...urlParams, ...bodyParams };
+-}
+-
+-
+-export default {
+-  async fetch(request, env, ctx) {
+-    const url = new URL(request.url);
+-
+-    if (url.pathname.includes('/skin')) {
+-      const html = `<!DOCTYPE html>
+-<html lang="zh-CN">
+-<head>
+-    <meta charset="UTF-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-    <title>消息推送</title>
+-    <style>
+-        * {
+-            margin: 0;
+-            padding: 0;
+-            box-sizing: border-box;
+-            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+-        }
+-
+-        body {
+-            background: linear-gradient(135deg, #0c0c2e 0%, #1a1a3e 100%);
+-            color: #e0f7fa;
+-            min-height: 100vh;
+-            display: flex;
+-            justify-content: center;
+-            align-items: center;
+-            padding: 20px;
+-            overflow-x: hidden;
+-            position: relative;
+-        }
+-
+-        /* 动态背景效果 */
+-        body::before {
+-            content: '';
+-            position: absolute;
+-            top: 0;
+-            left: 0;
+-            width: 100%;
+-            height: 100%;
+-            background:
+-                radial-gradient(circle at 20% 30%, rgba(0, 150, 136, 0.15) 0%, transparent 50%),
+-                radial-gradient(circle at 80% 70%, rgba(0, 188, 212, 0.15) 0%, transparent 50%);
+-            z-index: -1;
+-        }
+-
+-        .container {
+-            max-width: 800px;
+-            width: 100%;
+-            background: rgba(18, 18, 40, 0.85);
+-            backdrop-filter: blur(10px);
+-            border-radius: 16px;
+-            padding: 40px;
+-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5),
+-                        0 0 0 1px rgba(0, 150, 136, 0.2),
+-                        0 0 20px rgba(0, 188, 212, 0.3);
+-            position: relative;
+-            overflow: hidden;
+-            transition: transform 0.3s ease, box-shadow 0.3s ease;
+-        }
+-
+-        .container:hover {
+-            transform: translateY(-5px);
+-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.6),
+-                        0 0 0 1px rgba(0, 150, 136, 0.4),
+-                        0 0 30px rgba(0, 188, 212, 0.5);
+-        }
+-
+-        .container::before {
+-            content: '';
+-            position: absolute;
+-            top: 0;
+-            left: 0;
+-            width: 100%;
+-            height: 4px;
+-            background: linear-gradient(90deg, #00bcd4, #009688);
+-        }
+-
+-        .title {
+-            text-align: center;
+-            margin-bottom: 40px;
+-            font-size: 2.2rem;
+-            font-weight: 300;
+-            letter-spacing: 2px;
+-            color: #00bcd4;
+-            position: relative;
+-            padding-bottom: 15px;
+-        }
+-
+-        .title::after {
+-            content: '';
+-            position: absolute;
+-            bottom: 0;
+-            left: 50%;
+-            transform: translateX(-50%);
+-            width: 100px;
+-            height: 2px;
+-            background: linear-gradient(90deg, transparent, #00bcd4, transparent);
+-        }
+-
+-        .info-card {
+-            background: rgba(30, 30, 60, 0.7);
+-            border-radius: 12px;
+-            padding: 25px;
+-            margin-bottom: 25px;
+-            border-left: 4px solid #00bcd4;
+-            transition: all 0.3s ease;
+-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+-        }
+-
+-        .info-card:hover {
+-            transform: translateX(5px);
+-            background: rgba(40, 40, 70, 0.8);
+-            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+-        }
+-
+-        .info-label {
+-            font-size: 1.3rem;
+-            color: #80deea;
+-            margin-bottom: 10px;
+-            display: flex;
+-            align-items: center;
+-        }
+-
+-        .info-label::before {
+-            content: '';
+-            display: inline-block;
+-            width: 8px;
+-            height: 8px;
+-            border-radius: 50%;
+-            background: #00bcd4;
+-            margin-right: 10px;
+-        }
+-
+-        .info-content {
+-            font-size: 1.2rem;
+-            color: #e0f7fa;
+-            font-weight: 500;
+-            word-break: break-word;
+-            line-height: 1.6;
+-            white-space: pre-line;
+-        }
+-
+-        .pulse {
+-            animation: pulse 2s infinite;
+-        }
+-
+-        @keyframes pulse {
+-            0% {
+-                box-shadow: 0 0 0 0 rgba(0, 188, 212, 0.4);
+-            }
+-            70% {
+-                box-shadow: 0 0 0 10px rgba(0, 188, 212, 0);
+-            }
+-            100% {
+-                box-shadow: 0 0 0 0 rgba(0, 188, 212, 0);
+-            }
+-        }
+-
+-        /* Markdown 样式覆盖 */
+-        .info-content h1, .info-content h2, .info-content h3, .info-content h4, .info-content h5, .info-content h6 {
+-            color: #00bcd4;
+-            margin-top: 1em;
+-            margin-bottom: 0.5em;
+-            font-weight: 400;
+-        }
+-        .info-content p {
+-            margin-bottom: 1em;
+-            line-height: 1.6;
+-        }
+-        .info-content strong {
+-            color: #e0f7fa;
+-            font-weight: 600;
+-        }
+-        .info-content em {
+-            color: #80deea;
+-            font-style: italic;
+-        }
+-        .info-content code {
+-            background: rgba(0, 0, 0, 0.3);
+-            color: #00bcd4;
+-            padding: 2px 4px;
+-            border-radius: 4px;
+-            font-family: 'Courier New', monospace;
+-        }
+-        .info-content pre {
+-            background: rgba(0, 0, 0, 0.4);
+-            color: #e0f7fa;
+-            padding: 1em;
+-            border-radius: 8px;
+-            overflow-x: auto;
+-            margin-bottom: 1em;
+-        }
+-        .info-content blockquote {
+-            border-left: 4px solid #009688;
+-            margin: 1em 0;
+-            padding-left: 1em;
+-            color: #80deea;
+-            font-style: italic;
+-        }
+-        .info-content ul, .info-content ol {
+-            margin-bottom: 1em;
+-            padding-left: 2em;
+-        }
+-        .info-content li {
+-            margin-bottom: 0.5em;
+-        }
+-        .info-content a {
+-            color: #00bcd4;
+-            text-decoration: none;
+-        }
+-        .info-content a:hover {
+-            text-decoration: underline;
+-        }
+-        .info-content table {
+-            width: 100%;
+-            border-collapse: collapse;
+-            margin-bottom: 1em;
+-            background: rgba(0, 0, 0, 0.2);
+-            border-radius: 8px;
+-            overflow: hidden;
+-        }
+-        .info-content th, .info-content td {
+-            padding: 0.75em;
+-            text-align: left;
+-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+-        }
+-        .info-content th {
+-            background: rgba(0, 188, 212, 0.2);
+-            color: #00bcd4;
+-        }
+-
+-        /* 响应式设计 */
+-        @media (max-width: 768px) {
+-            .container {
+-                padding: 25px;
+-            }
+-
+-            .title {
+-                font-size: 1.9rem;
+-            }
+-
+-            .info-content {
+-                font-size: 1.1rem;
+-            }
+-
+-            .info-label {
+-                font-size: 1.2rem;
+-            }
+-        }
+-
+-        @media (max-width: 480px) {
+-            .container {
+-                padding: 20px;
+-            }
+-
+-            .title {
+-                font-size: 1.6rem;
+-            }
+-
+-            .info-content {
+-                font-size: 1rem;
+-            }
+-
+-            .info-card {
+-                padding: 20px;
+-            }
+-
+-            .info-label {
+-                font-size: 1.1rem;
+-            }
+-        }
+-
+-        /* 动态粒子背景 */
+-        .particles {
+-            position: absolute;
+-            top: 0;
+-            left: 0;
+-            width: 100%;
+-            height: 100%;
+-            z-index: -1;
+-            overflow: hidden;
+-        }
+-
+-        .particle {
+-            position: absolute;
+-            background: rgba(0, 188, 212, 0.3);
+-            border-radius: 50%;
+-            animation: float 15s infinite linear;
+-        }
+-
+-        @keyframes float {
+-            0% {
+-                transform: translateY(0) translateX(0);
+-                opacity: 0;
+-            }
+-            10% {
+-                opacity: 1;
+-            }
+-            90% {
+-                opacity: 1;
+-            }
+-            100% {
+-                transform: translateY(-100vh) translateX(100px);
+-                opacity: 0;
+-            }
+-        }
+-    </style>
+-</head>
+-<body>
+-    <div class="particles" id="particles"></div>
+-
+-    <div class="container pulse">
+-        <div class="title" id="title">消息推送</div>
+-
+-        <div class="info-card">
+-            <div class="info-label">通知内容</div>
+-            <div class="info-content" id="message">无告警信息</div>
+-        </div>
+-
+-        <div class="info-card">
+-            <div class="info-label">时间</div>
+-            <div class="info-content" id="date">无时间信息</div>
+-        </div>
+-    </div>
+-    <script src="https://cdn.jsdelivr.net/npm/marked/lib/marked.umd.js"></script>
+-    <script>
+-        // 从 URL 参数读取数据
+-        function getUrlParams() {
+-            const urlParams = new URLSearchParams(window.location.search);
+-            return {
+-                title: urlParams.get('title') || '消息推送',
+-                message: urlParams.get('message') || '无告警信息',
+-                date: urlParams.get('date') || '无时间信息'
+-            };
+-        }
+-
+-        // 创建动态粒子背景
+-        function createParticles() {
+-            const particlesContainer = document.getElementById('particles');
+-            const particleCount = 25;
+-            const colors = [
+-                'rgba(0, 188, 212, 0.2)',
+-                'rgba(0, 150, 136, 0.2)',
+-                'rgba(77, 182, 172, 0.15)'
+-            ];
+-
+-            for (let i = 0; i < particleCount; i++) {
+-                const particle = document.createElement('div');
+-                particle.classList.add('particle');
+-
+-                const size = Math.random() * 3 + 1;
+-                particle.style.width = size + 'px';
+-                particle.style.height = size + 'px';
+-
+-                const randomColor = colors[Math.floor(Math.random() * colors.length)];
+-                particle.style.background = randomColor;
+-
+-                particle.style.left = (Math.random() * 100) + '%';
+-                particle.style.top = (Math.random() * 100) + '%';
+-
+-                particle.style.animationDelay = (Math.random() * 20) + 's';
+-                particle.style.animationDuration = (20 + Math.random() * 15) + 's';
+-
+-                particlesContainer.appendChild(particle);
+-            }
+-        }
+-
+-        // 处理 Markdown 渲染
+-        function renderMarkdown() {
+-            const messageEl = document.getElementById('message');
+-            if (messageEl && typeof marked !== 'undefined') {
+-                const markdownText = messageEl.textContent || messageEl.innerText;
+-                messageEl.innerHTML = marked.parse(markdownText);
+-            }
+-        }
+-
+-        // 填充页面内容
+-        function fillContent() {
+-            const params = getUrlParams();
+-            document.getElementById('title').textContent = params.title;
+-            document.getElementById('message').textContent = params.message;
+-            document.getElementById('date').textContent = params.date;
+-            renderMarkdown(); // 渲染 Markdown
+-        }
+-
+-        // 页面加载时调用
+-        window.onload = function() {
+-            createParticles();
+-            fillContent();
+-        };
+-    </script>
+-</body>
+-</html>`;
+-      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+-    }
+-    // If path is a single segment like '/<token>', serve an interactive test page
+-    // but ignore reserved paths like '/wxsend' and '/index.html'
+-    const singleSeg = url.pathname.match(/^\/([^\/]+)\/?$/);
+-    if (singleSeg && singleSeg[1] && singleSeg[1] !== 'wxsend' && singleSeg[1] !== 'index.html') {
+-      const rawTokenFromPath = singleSeg[1];
+-
+-      // 1. Authenticate the token first
+-      if (rawTokenFromPath !== env.API_TOKEN) {
+-        const responseBody = { msg: 'Invalid token' };
+-        return new Response(JSON.stringify(responseBody), {
+-          status: 403,
+-          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+-        });
+-      }
+-
+-      // 2. Sanitize the token for safe embedding into HTML value attributes
+-      const sanitizedToken = rawTokenFromPath
+-        .replace(/&/g, "&amp;")
+-        .replace(/</g, "&lt;")
+-        .replace(/>/g, "&gt;")
+-        .replace(/"/g, "&quot;");
+-
+-      const html = `<!doctype html>
+-<html lang="zh-CN">
+-  <head>
+-    <meta charset="utf-8" />
+-    <meta name="viewport" content="width=device-width,initial-scale=1" />
+-    <title>WXPush 测试页面</title>
+-    <link rel="preconnect" href="https://fonts.googleapis.com">
+-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700&display=swap" rel="stylesheet">
+-    <style>
+-      body {
+-        font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+-        display: flex;
+-        align-items: center;
+-        justify-content: center;
+-        min-height: 100vh;
+-        margin: 0;
+-        padding: 24px;
+-        background: linear-gradient(170deg, #f3e8ff 0%, #ffffff 100%);
+-        color: #1f2937;
+-        box-sizing: border-box;
+-      }
+-      .container {
+-        background: rgba(255, 255, 255, 0.85);
+-        backdrop-filter: blur(10px);
+-        border-radius: 24px;
+-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+-        border: 1px solid rgba(255, 255, 255, 0.18);
+-        padding: 40px;
+-        max-width: 720px;
+-        width: 100%;
+-        text-align: left;
+-        transition: transform 0.3s ease, box-shadow 0.3s ease;
+-      }
+-      .container:hover {
+-        transform: translateY(-8px);
+-        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.12);
+-      }
+-      h1 {
+-        margin: 0 0 12px;
+-        font-size: 32px;
+-        font-weight: 700;
+-        text-align: center;
+-        background: linear-gradient(90deg, #8b5cf6, #3b82f6);
+-        -webkit-background-clip: text;
+-        -webkit-text-fill-color: transparent;
+-      }
+-      .hint {
+-        color: #4b5563;
+-        margin: 0 0 24px;
+-        font-size: 16px;
+-        line-height: 1.6;
+-        text-align: center;
+-      }
+-      label {
+-        display: block;
+-        margin: 16px 0 8px;
+-        font-weight: 700;
+-        color: #374151;
+-      }
+-      input[type=text], textarea {
+-        width: 100%;
+-        padding: 12px;
+-        border: 1px solid #d4d4d8;
+-        border-radius: 12px;
+-        background: #f4f4f5;
+-        transition: all 0.2s ease;
+-        box-sizing: border-box;
+-        font-family: inherit;
+-        font-size: 14px;
+-      }
+-      input[type=text]:focus, textarea:focus {
+-        outline: none;
+-        border-color: #8b5cf6;
+-        background: #ffffff;
+-        box-shadow: 0 0 0 2px #c4b5fd;
+-      }
+-      button {
+-        margin-top: 24px;
+-        padding: 12px 20px;
+-        border-radius: 12px;
+-        border: 0;
+-        background: #8b5cf6;
+-        color: #fff;
+-        cursor: pointer;
+-        font-weight: 700;
+-        transition: all 0.2s ease;
+-      }
+-      button:hover {
+-        background: #7c3aed;
+-        transform: translateY(-2px);
+-      }
+-      button#clearBtn {
+-         background: #f4f4f5;
+-         color: #374151;
+-         border: 1px solid #e4e4e7;
+-      }
+-       button#clearBtn:hover {
+-         background: #ffffff;
+-         border-color: #d4d4d8;
+-         color: #1f2937;
+-      }
+-      pre {
+-        background: #1f2937;
+-        color: #e5e7eb;
+-        padding: 16px;
+-        border-radius: 12px;
+-        white-space: pre-wrap;
+-        word-break: break-all;
+-      }
+-    </style>
+-  </head>
+-  <body>
+-    <div class="container">
+-      <h1>WXPush 测试页面</h1>
+-      <p class="hint">当前 token (来自路径)：<strong>${sanitizedToken}</strong></p>
+-
+-      <form id="testForm" method="POST" action="/wxsend">
+-
+-        <label for="title">标题 (title)</label>
+-        <input id="title" name="title" type="text" value="测试标题" />
+-
+-        <label for="content">内容 (content)</label>
+-        <textarea id="content" name="content" rows="4">这是测试内容</textarea>
+-
+-        <label for="userid">用户 ID (userid，可选，多用户用 | 分隔)</label>
+-        <input id="userid" name="userid" type="text" placeholder="例如: OPENID1|OPENID2" />
+-
+-        <label for="appid">WX_APPID (可选，留空使用环境变量)</label>
+-        <input id="appid" name="appid" type="text" />
+-
+-        <label for="secret">WX_SECRET (可选，留空使用环境变量)</label>
+-        <input id="secret" name="secret" type="text" />
+-
+-        <label for="template_id">模板 ID (template_id，可选)</label>
+-        <input id="template_id" name="template_id" type="text" />
+-
+-        <label for="base_url">跳转链接 base_url (可选)</label>
+-        <input id="base_url" name="base_url" type="text" />
+-
+-        <input type="hidden" name="token" id="hiddenToken" value="${sanitizedToken}" />
+-
+-        <div style="display:flex;gap:12px;align-items:center">
+-          <button id="sendBtn" type="submit">发送测试请求</button>
+-          <button type="button" id="clearBtn">清空</button>
+-        </div>
+-      </form>
+-      <div id="responseCard" style="display:none; margin-top: 20px;">
+-        <label for="responseArea">响应</label>
+-        <pre id="responseArea"></pre>
+-      </div>
+-    </div>
+-
+-    <script>
+-      const form = document.getElementById('testForm');
+-      const sendBtn = document.getElementById('sendBtn');
+-      const clearBtn = document.getElementById('clearBtn');
+-      const responseArea = document.getElementById('responseArea');
+-      const responseCard = document.getElementById('responseCard');
+-
+-      if (form && sendBtn && clearBtn && responseArea && responseCard) {
+-        clearBtn.addEventListener('click', () => {
+-          document.getElementById('title').value = '';
+-          document.getElementById('content').value = '';
+-          document.getElementById('userid').value = '';
+-          document.getElementById('appid').value = '';
+-          document.getElementById('secret').value = '';
+-          document.getElementById('template_id').value = '';
+-          document.getElementById('base_url').value = '';
+-          responseArea.textContent = '';
+-          responseCard.style.display = 'none';
+-        });
+-
+-        form.addEventListener('submit', async (event) => {
+-          event.preventDefault();
+-          sendBtn.disabled = true;
+-          const originalText = sendBtn.textContent;
+-          sendBtn.textContent = '发送中...';
+-          responseCard.style.display = 'none';
+-
+-          const formData = new FormData(form);
+-          const payload = {};
+-          for (const [k, v] of formData.entries()) {
+-             if (k !== 'token' && v) {
+-                payload[k] = v;
+-             }
+-          }
+-
+-          try {
+-            const headers = { 'Content-Type': 'application/json' };
+-            const token = document.getElementById('hiddenToken').value;
+-            if (token) headers['Authorization'] = token;
+-
+-            const response = await fetch('/wxsend', { method: 'POST', headers, body: JSON.stringify(payload) });
+-            const responseText = await response.text();
+-            responseArea.textContent = 'Status: ' + response.status + '\\n\\n' + responseText;
+-            responseCard.style.display = 'block';
+-          } catch (err) {
+-            responseArea.textContent = 'Fetch error: ' + err.message;
+-            responseCard.style.display = 'block';
+-          } finally {
+-            sendBtn.disabled = false;
+-            sendBtn.textContent = originalText;
+-          }
+-        });
+-      }
+-    </script>
+-  </body>
+-</html>`;
+-
+-      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+-    }
+-
+-    // Route: only handle message sending on '/wxsend'
+-    if (url.pathname === '/wxsend') {
+-      // MODIFIED: Use the new helper function to get all parameters
+-      const params = await getParams(request);
+-
+-      // MODIFIED: Read parameters from the unified 'params' object
+-      const content = params.content;
+-      const title = params.title;
+-      // token can come from body/url params or from Authorization header
+-      let requestToken = params.token;
+-      if (!requestToken) {
+-        const authHeader = request.headers.get('Authorization') || request.headers.get('authorization');
+-        if (authHeader) {
+-          // support formats: 'Bearer <token>' or raw token
+-          const parts = authHeader.split(' ');
+-          requestToken = parts.length === 2 && /^Bearer$/i.test(parts[0]) ? parts[1] : authHeader;
+-        }
+-      }
+-
+-      if (!content || !title || !requestToken) {
+-        const responseBody = { msg: 'Missing required parameters: content, title, token' };
+-        return new Response(JSON.stringify(responseBody), {
+-          status: 400,
+-          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+-        });
+-      }
+-
+-      if (requestToken !== env.API_TOKEN) {
+-        const responseBody = { msg: 'Invalid token' };
+-        return new Response(JSON.stringify(responseBody), {
+-          status: 403,
+-          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+-        });
+-      }
+-
+-      const appid = params.appid || env.WX_APPID;
+-      const secret = params.secret || env.WX_SECRET;
+-      const useridStr = params.userid || env.WX_USERID;
+-      const template_id = params.template_id || env.WX_TEMPLATE_ID;
+-      const base_url = params.base_url || env.WX_BASE_URL;
+-
+-      if (!appid || !secret || !useridStr || !template_id) {
+-          const responseBody = { msg: 'Missing required environment variables: WX_APPID, WX_SECRET, WX_USERID, WX_TEMPLATE_ID' };
+-          return new Response(JSON.stringify(responseBody), {
+-            status: 500,
+-            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+-          });
+-      }
+-
+-      const user_list = useridStr.split('|').map(uid => uid.trim()).filter(Boolean);
+-
+-      try {
+-        const accessToken = await getStableToken(appid, secret);
+-        if (!accessToken) {
+-          const responseBody = { msg: 'Failed to get access token' };
+-          return new Response(JSON.stringify(responseBody), {
+-            status: 500,
+-            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+-          });
+-        }
+-
+-        const results = await Promise.all(user_list.map(userid =>
+-          sendMessage(accessToken, userid, template_id, base_url, title, content)
+-        ));
+-
+-        const successfulMessages = results.filter(r => r.errmsg === 'ok');
+-
+-        if (successfulMessages.length > 0) {
+-          const responseBody = { msg: `Successfully sent messages to ${successfulMessages.length} user(s). First response: ok` };
+-          return new Response(JSON.stringify(responseBody), {
+-            status: 200,
+-            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+-          });
+-        } else {
+-          const firstError = results.length > 0 ? results[0].errmsg : "Unknown error";
+-          const responseBody = { msg: `Failed to send messages. First error: ${firstError}` };
+-          return new Response(JSON.stringify(responseBody), {
+-            status: 500,
+-            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+-          });
+-        }
+-
+-      } catch (error) {
+-        console.error('Error:', error);
+-        const responseBody = { msg: `An error occurred: ${error.message}` };
+-        return new Response(JSON.stringify(responseBody), {
+-          status: 500,
+-          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+-        });
+-      }
+-    }
+-
+-    // If not /wxsend, handle homepage or other paths
+-    // If request is a GET to root, serve a simple HTML homepage describing the service
+-    if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+-      const html = `<!doctype html>
+-<html lang="zh-CN">
+-  <head>
+-    <meta charset="utf-8" />
+-    <meta name="viewport" content="width=device-width,initial-scale=1" />
+-    <title>WXPush — 微信消息推送服务</title>
+-    <link rel="preconnect" href="https://fonts.googleapis.com">
+-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;700&display=swap" rel="stylesheet">
+-    <style>
+-      body {
+-        font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+-        display: flex;
+-        align-items: center;
+-        justify-content: center;
+-        min-height: 100vh;
+-        margin: 0;
+-        background: linear-gradient(170deg, #f3e8ff 0%, #ffffff 100%);
+-        color: #1f2937;
+-      }
+-      .card {
+-        background: rgba(255, 255, 255, 0.85);
+-        backdrop-filter: blur(10px);
+-        border-radius: 24px;
+-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+-        border: 1px solid rgba(255, 255, 255, 0.18);
+-        padding: 40px;
+-        max-width: 720px;
+-        width: 90%;
+-        text-align: center;
+-        transition: transform 0.3s ease, box-shadow 0.3s ease;
+-      }
+-      .card:hover {
+-        transform: translateY(-8px);
+-        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.12);
+-      }
+-      h1 {
+-        margin: 0 0 12px;
+-        font-size: 32px;
+-        font-weight: 700;
+-        background: linear-gradient(90deg, #8b5cf6, #3b82f6);
+-        -webkit-background-clip: text;
+-        -webkit-text-fill-color: transparent;
+-      }
+-      p {
+-        color: #4b5563;
+-        margin: 0 0 24px;
+-        font-size: 16px;
+-        line-height: 1.6;
+-      }
+-      .author {
+-        margin: 20px 0;
+-        color: #374151;
+-        font-size: 14px;
+-      }
+-      .icons {
+-        display: flex;
+-        gap: 20px;
+-        justify-content: center;
+-        margin-top: 24px;
+-      }
+-      .btn {
+-        display: inline-flex;
+-        align-items: center;
+-        gap: 8px;
+-        padding: 12px 20px;
+-        border-radius: 12px;
+-        text-decoration: none;
+-        color: #374151;
+-        background: #f4f4f5;
+-        border: 1px solid #e4e4e7;
+-        font-weight: 700;
+-        transition: all 0.2s ease;
+-      }
+-      .btn:hover {
+-        background: #ffffff;
+-        border-color: #d4d4d8;
+-        transform: translateY(-2px);
+-        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+-      }
+-      .icon {
+-        width: 22px;
+-        height: 22px;
+-        display: inline-block;
+-      }
+-      footer {
+-        margin-top: 24px;
+-        color: #6b7280;
+-        font-size: 12px;
+-      }
+-    </style>
+-  </head>
+-  <body>
+-    <div class="card">
+-      <h1>WXPush</h1>
+-      <p>一个极简、可靠的微信消息推送服务，通过简单的 Webhook 请求，即可向微信用户发送模板消息。</p>
+-      <div class="author">作者：<strong>饭奇骏</strong></div>
+-      <div class="icons">
+-        <a class="btn" href="https://github.com/frankiejun" target="_blank" rel="noopener noreferrer">
+-          <svg class="icon" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M12 .5C5.73.5.75 5.48.75 11.75c0 4.93 3.2 9.11 7.64 10.59.56.1.76-.24.76-.53 0-.26-.01-.95-.02-1.87-3.11.68-3.77-1.5-3.77-1.5-.51-1.3-1.25-1.65-1.25-1.65-1.02-.7.08-.69.08-.69 1.12.08 1.71 1.15 1.71 1.15 1.0 1.72 2.62 1.22 3.26.93.1-.72.39-1.22.71-1.5-2.48-.28-5.09-1.24-5.09-5.53 0-1.22.44-2.21 1.16-2.99-.12-.28-.5-1.41.11-2.94 0 0 .95-.31 3.12 1.15.9-.25 1.86-.38 2.82-.39.96.01 1.92.14 2.82.39 2.17-1.46 3.12-1.15 3.12-1.15.61 1.53.23 2.66.11 2.94.72.78 1.16 1.77 1.16 2.99 0 4.3-2.62 5.25-5.11 5.53.4.35.75 1.04.75 2.09 0 1.51-.01 2.72-.01 3.09 0 .29.2.63.77.52C19.05 20.86 22.25 16.68 22.25 11.75 22.25 5.48 17.27.5 12 .5z"/></svg>
+-          GitHub
+-        </a>
+-        <a class="btn" href="https://www.youtube.com/@frankiejun8965" target="_blank" rel="noopener noreferrer">
+-          <svg class="icon" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M23.5 6.2s-.23-1.63-.94-2.34C21.55 3 19.9 3 19.12 2.9 16.54 2.6 12 2.6 12 2.6s-4.53 0-7.12.3C4.1 3 2.45 3.1 1.44 3.86.73 4.47.5 6.1.5 6.1S.25 8 .25 9.9v2.2c0 1.93.25 3.8.25 3.8s.23 1.63.94 2.34c.99.76 2.64.76 3.42.86 2.6.3 7.12.3 7.12.3s4.53 0 7.12-.3c.79-.1 2.44-.1 3.43-.86.7-.7.94-2.34.94-2.34s.25-1.9.25-3.8V9.9c0-1.9-.25-3.7-.25-3.7zM9.75 15.3V8.7l6.18 3.3-6.18 3.3z"/></svg>
+-          YouTube
+-        </a>
+-      </div>
+-      <footer>点击上方图标前往关注，以获取更多项目更新和演示。</footer>
+-    </div>
+-  </body>
+-</html>`;
+-
+-      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+-    }
+-
+-    // For any other path/method, return 404
+-    return new Response('Not Found', { status: 404 });
+-  },
+-
+-  async scheduled(event, env, ctx) {
+-    if (!env.ALIVE_DAYS) {
+-      return;
+-    }
+-    const aliveDays = Math.max(1, parseInt(env.ALIVE_DAYS, 10));
+-    if (Number.isNaN(aliveDays)) {
+-      return;
+-    }
+-    const anchor = Date.UTC(2026, 0, 1);
+-    const daysSince = Math.floor((Date.now() - anchor) / 86400000);
+-
+-    if (daysSince % aliveDays !== 0) {
+-      return;
+-    }
+-
+-    const appid = env.WX_APPID;
+-    const secret = env.WX_SECRET;
+-    const useridStr = env.WX_USERID;
+-    const template_id = env.WX_TEMPLATE_ID;
+-    const base_url = env.WX_BASE_URL;
+-
+-    if (!appid || !secret || !useridStr || !template_id) {
+-      console.error('[alive] missing env: WX_APPID, WX_SECRET, WX_USERID, WX_TEMPLATE_ID');
+-      return;
+-    }
+-
+-    try {
+-      const accessToken = await getStableToken(appid, secret);
+-      if (!accessToken) {
+-        console.error('[alive] failed to get access token (test account may be recycled)');
+-        return;
+-      }
+-
+-      const user_list = useridStr.split('|').map(uid => uid.trim()).filter(Boolean);
+-      const results = await Promise.all(user_list.map(userid =>
+-        sendMessage(accessToken, userid, template_id, base_url, '保活测试', '测试账号保活心跳消息')
+-      ));
+-
+-      const failed = results.filter(r => r.errmsg !== 'ok');
+-      if (failed.length > 0) {
+-        console.error(`[alive] send failed for ${failed.length}/${results.length} user(s):`, JSON.stringify(failed));
+-      } else {
+-        console.log(`[alive] heartbeat sent to ${results.length} user(s)`);
+-      }
+-    } catch (error) {
+-      console.error('[alive] error:', error);
+-    }
+-  },
+-};
+-
+-async function getStableToken(appid, secret) {
+-  const tokenUrl = 'https://api.weixin.qq.com/cgi-bin/stable_token';
+-  const payload = {
+-    grant_type: 'client_credential',
+-    appid: appid,
+-    secret: secret,
+-    force_refresh: false
+-  };
+-  const response = await fetch(tokenUrl, {
+-    method: 'POST',
+-    headers: { 'Content-Type': 'application/json;charset=utf-8' },
+-    body: JSON.stringify(payload)
+-  });
+-  const data = await response.json();
+-  return data.access_token;
+-}
+-
+-async function sendMessage(accessToken, userid, template_id, base_url, title, content) {
+-  const sendUrl = `https://api.weixin.qq.com/cgi-bin/message/template/send?access_token=${accessToken}`;
+-
+-  // Create a Date object for Beijing time (UTC+8) by adding 8 hours to the current UTC time
+-  const beijingTime = new Date(new Date().getTime() + 8 * 60 * 60 * 1000);
+-  // Format the date to 'YYYY-MM-DD HH:MM:SS' string
+-  const date = beijingTime.toISOString().slice(0, 19).replace('T', ' ');
+-
+-  const encoded_message = encodeURIComponent(content);
+-  const encoded_date = encodeURIComponent(date);
+-
+-  const separator = base_url?.includes('?') ? '&' : '?';
+-  const payload = {
+-    touser: userid,
+-    template_id: template_id,
+-    url: `${base_url}${separator}message=${encoded_message}&date=${encoded_date}&title=${encodeURIComponent(title)}`,
+-    data: {
+-      title: { value: title },
+-      content: { value: content }
+-    }
+-  };
+-
+-  const response = await fetch(sendUrl, {
+-    method: 'POST',
+-    headers: { 'Content-Type': 'application/json;charset=utf-8' },
+-    body: JSON.stringify(payload)
+-  });
+-
+-  return await response.json();
+-}
+diff --git a/src/view.js b/src/view.js
+new file mode 100644
+index 0000000..034f2fc
+--- /dev/null
++++ b/src/view.js
+@@ -0,0 +1,76 @@
++import { escapeHtml } from './common.js';
++
++const PUBLIC_HEADERS = {
++  'Cache-Control': 'no-store, private',
++  'Referrer-Policy': 'no-referrer',
++  'X-Content-Type-Options': 'nosniff',
++  'X-Robots-Tag': 'noindex, nofollow, noarchive',
++  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
++};
++
++function errorResponse(status) {
++  return new Response(status === 410 ? '消息已过期' : '未找到消息', {
++    status,
++    headers: { ...PUBLIC_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' },
++  });
++}
++
++function render(message) {
++  const title = escapeHtml(message.title);
++  const content = escapeHtml(message.content);
++  const date = new Intl.DateTimeFormat('zh-CN', {
++    timeZone: 'Asia/Shanghai',
++    year: 'numeric', month: '2-digit', day: '2-digit',
++    hour: '2-digit', minute: '2-digit', hour12: false,
++  }).format(new Date(message.created_at * 1000));
++  return `<!doctype html>
++<html lang="zh-CN">
++<head>
++  <meta charset="utf-8">
++  <meta name="viewport" content="width=device-width, initial-scale=1">
++  <title>${title}</title>
++  <style>
++    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
++    * { box-sizing: border-box; }
++    body { margin: 0; background: #f4f7f8; color: #172b30; }
++    main { max-width: 760px; margin: 0 auto; padding: 32px 20px 56px; }
++    header { border-bottom: 1px solid #cbd6d9; padding-bottom: 20px; margin-bottom: 24px; }
++    h1 { font-size: 24px; line-height: 1.35; margin: 0 0 12px; overflow-wrap: anywhere; }
++    time { color: #596b70; font-size: 14px; }
++    article { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.75; font-size: 16px; }
++  </style>
++</head>
++<body><main><header><h1>${title}</h1><time>${date} (北京时间)</time></header><article>${content}</article></main></body>
++</html>`;
++}
++
++export default {
++  async fetch(request, env) {
++    const url = new URL(request.url);
++    if (url.protocol !== 'https:' || url.hostname !== env.VIEW_HOST || url.search) {
++      return errorResponse(404);
++    }
++    if (request.method !== 'GET' && request.method !== 'HEAD') {
++      return new Response('Method Not Allowed', {
++        status: 405,
++        headers: { ...PUBLIC_HEADERS, Allow: 'GET, HEAD' },
++      });
++    }
++    const match = /^\/m\/([A-Za-z0-9_-]{32})$/.exec(url.pathname);
++    if (!match) return errorResponse(404);
++    if (!env.DB) return new Response('Service Unavailable', { status: 503, headers: PUBLIC_HEADERS });
++
++    try {
++      const message = await env.DB.prepare(
++        'SELECT title, content, created_at, expires_at FROM messages WHERE id = ?',
++      ).bind(match[1]).first();
++      if (!message) return errorResponse(404);
++      if (message.expires_at <= Math.floor(Date.now() / 1000)) return errorResponse(410);
++      return new Response(request.method === 'HEAD' ? null : render(message), {
++        headers: { ...PUBLIC_HEADERS, 'Content-Type': 'text/html; charset=utf-8' },
++      });
++    } catch {
++      return new Response('Service Unavailable', { status: 503, headers: PUBLIC_HEADERS });
++    }
++  },
++};
+diff --git a/test/workers.test.js b/test/workers.test.js
+new file mode 100644
+index 0000000..bf1b2bf
+--- /dev/null
++++ b/test/workers.test.js
+@@ -0,0 +1,190 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import api from '../src/api.js';
++import view from '../src/view.js';
++
++const API_URL = 'https://push-api.matrixsku.com/wxsend';
++const NOW = 1_800_000_000;
++
++function database() {
++  const rows = new Map();
++  return {
++    rows,
++    prepare(sql) {
++      let params;
++      return {
++        bind(...values) { params = values; return this; },
++        async run() {
++          if (sql.startsWith('INSERT')) {
++            const [id, title, content, created_at, expires_at] = params;
++            rows.set(id, { title, content, created_at, expires_at });
++            return { meta: { changes: 1 } };
++          }
++          if (sql.startsWith('DELETE')) {
++            let changes = 0;
++            for (const [id, value] of rows) {
++              if (value.expires_at <= params[0]) { rows.delete(id); changes++; }
++            }
++            return { meta: { changes } };
++          }
++          throw new Error('unexpected SQL');
++        },
++        async first() {
++          if (!sql.startsWith('SELECT')) throw new Error('unexpected SQL');
++          return rows.get(params[0]) || null;
++        },
++      };
++    },
++  };
++}
++
++function env(db = database()) {
++  return {
++    DB: db,
++    API_HOST: 'push-api.matrixsku.com',
++    VIEW_HOST: 'push.matrixsku.com',
++    VIEW_ORIGIN: 'https://push.matrixsku.com',
++    API_TOKEN: 'sample-bearer-token',
++    WX_APPID: 'sample-appid',
++    WX_SECRET: 'sample-secret',
++    WX_USERID: 'allowed-a|allowed-b',
++    WX_TEMPLATE_ID: 'sample-template',
++  };
++}
++
++function request(body, options = {}) {
++  return new Request(options.url || API_URL, {
++    method: options.method || 'POST',
++    headers: {
++      Authorization: options.authorization ?? 'Bearer sample-bearer-token',
++      'Content-Type': options.contentType || 'application/json',
++    },
++    body: options.method === 'GET' ? undefined : JSON.stringify(body),
++  });
++}
++
++function mockWechat(t) {
++  const sends = [];
++  t.mock.method(globalThis, 'fetch', async (url, options) => {
++    const payload = JSON.parse(options.body);
++    if (url.endsWith('/stable_token')) {
++      assert.equal(payload.secret, 'sample-secret');
++      return Response.json({ access_token: 'sample-wechat-token' });
++    }
++    assert.match(url, /message\/template\/send/);
++    sends.push(payload);
++    return Response.json({ errcode: 0, errmsg: 'ok' });
++  });
++  return sends;
++}
++
++test('method, host, and bearer are enforced before body parsing', async () => {
++  const config = env();
++  assert.equal((await api.fetch(new Request(API_URL), config)).status, 405);
++  assert.equal((await api.fetch(request({ title: 'a', content: 'b' }, {
++    url: 'https://push.matrixsku.com/wxsend',
++  }), config)).status, 404);
++  assert.equal((await api.fetch(request({ title: 'a', content: 'b' }, {
++    authorization: 'wrong',
++  }), config)).status, 401);
++  assert.equal((await api.fetch(new Request('https://push-api.matrixsku.com/sample-bearer-token'), config)).status, 404);
++});
++
++test('query/body credentials, recipient overrides, malformed and oversize messages are rejected', async () => {
++  const config = env();
++  const cases = [
++    request({ title: 'a', content: 'b' }, { url: `${API_URL}?token=sample-bearer-token` }),
++    request({ title: 'a', content: 'b', token: 'sample-bearer-token' }),
++    request({ title: 'a', content: 'b', appid: 'override' }),
++    request({ title: 'a', content: 'b', recipients: ['not-allowed'] }),
++    request({ title: 'a', content: 'b', recipients: ['allowed-a', 'allowed-a'] }),
++    request({ title: '', content: 'b' }),
++    request({ title: 'a'.repeat(81), content: 'b' }),
++    request({ title: 'a', content: 'b'.repeat(8001) }),
++  ];
++  for (const item of cases) assert.equal((await api.fetch(item, config)).status, 400);
++  assert.equal((await api.fetch(request({ title: 'a', content: 'b'.repeat(17000) }), config)).status, 413);
++  assert.equal(config.DB.rows.size, 0);
++});
++
++test('send stores full content only in D1; public detail escapes HTML and expires at 3 days', async t => {
++  const config = env();
++  const sends = mockWechat(t);
++  t.mock.method(Date, 'now', () => NOW * 1000);
++  t.mock.method(console, 'log', () => {});
++  const response = await api.fetch(request({
++    title: '<Alert>',
++    content: '<script>alert(1)</script>\n' + 'detail '.repeat(40),
++    recipients: ['allowed-a'],
++  }), config);
++  assert.equal(response.status, 200);
++  const result = await response.json();
++  assert.equal(result.sent, 1);
++  assert.equal(result.failed, 0);
++  assert.match(result.detail_url, /^https:\/\/push\.matrixsku\.com\/m\/[A-Za-z0-9_-]{32}$/);
++  assert.equal(result.expires_at, NOW + 259200);
++  assert.equal(sends.length, 1);
++  assert.equal(sends[0].touser, 'allowed-a');
++  assert.equal(sends[0].url, result.detail_url);
++  assert.equal(sends[0].data.title.value, '<Alert>');
++  assert.ok(sends[0].data.content.value.length <= 180);
++  assert.ok(!sends[0].url.includes('script'));
++  assert.equal(config.DB.rows.size, 1);
++
++  const detail = await view.fetch(new Request(result.detail_url), config);
++  assert.equal(detail.status, 200);
++  assert.equal(detail.headers.get('Cache-Control'), 'no-store, private');
++  assert.equal(detail.headers.get('Referrer-Policy'), 'no-referrer');
++  assert.match(detail.headers.get('Content-Security-Policy'), /default-src 'none'/);
++  const html = await detail.text();
++  assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
++  assert.ok(!html.includes('<script>'));
++  assert.equal((await view.fetch(new Request(result.detail_url, { method: 'HEAD' }), config)).status, 200);
++  assert.equal((await view.fetch(new Request(result.detail_url + '?content=leak'), config)).status, 404);
++  assert.equal((await view.fetch(new Request(result.detail_url.replace('push.matrixsku.com', 'push-api.matrixsku.com')), config)).status, 404);
++
++  t.mock.restoreAll();
++  const expiredNow = (NOW + 259200) * 1000;
++  const originalNow = Date.now;
++  Date.now = () => expiredNow;
++  try { assert.equal((await view.fetch(new Request(result.detail_url), config)).status, 410); }
++  finally { Date.now = originalNow; }
++});
++
++test('weekly keepalive sends and hourly cleanup removes expired records', async t => {
++  const config = env();
++  const sends = mockWechat(t);
++  t.mock.method(Date, 'now', () => NOW * 1000);
++  t.mock.method(console, 'log', () => {});
++  await api.scheduled({ cron: '0 2 * * MON' }, config);
++  assert.equal(sends.length, 2);
++  assert.equal(config.DB.rows.size, 1);
++  t.mock.restoreAll();
++  const originalNow = Date.now;
++  const originalLog = console.log;
++  Date.now = () => (NOW + 259201) * 1000;
++  console.log = () => {};
++  try {
++    await api.scheduled({ cron: '0 * * * *' }, config);
++    assert.equal(config.DB.rows.size, 0);
++  } finally {
++    Date.now = originalNow;
++    console.log = originalLog;
++  }
++});
++
++test('partial WeChat failure returns counts without leaking message data', async t => {
++  const config = env();
++  t.mock.method(console, 'log', () => {});
++  t.mock.method(globalThis, 'fetch', async (url, options) => {
++    if (url.endsWith('/stable_token')) return Response.json({ access_token: 'sample-wechat-token' });
++    const payload = JSON.parse(options.body);
++    return Response.json({ errcode: payload.touser === 'allowed-a' ? 0 : 40003 });
++  });
++  const response = await api.fetch(request({ title: 'alert', content: 'sensitive detail' }), config);
++  assert.equal(response.status, 502);
++  const body = await response.text();
++  assert.match(body, /"sent":1,"failed":1/);
++  assert.ok(!body.includes('sensitive detail'));
++  assert.ok(!body.includes('sample-wechat-token'));
++});
+diff --git a/verification.md b/verification.md
+new file mode 100644
+index 0000000..f239533
+--- /dev/null
++++ b/verification.md
+@@ -0,0 +1,186 @@
++# Verification record (2026-10-02)
++
++Working directory for baseline and modified commands:
++`/Users/geek/Desktop/devops/private-cloud/private-gitlab/ai-life/wxpush-hardened`.
++The local baseline and modified checks used sample values only. The live
++checks below used Cloudflare Worker Secrets and a protected local client
++credential file; no credential value or bearer-by-link detail URL is recorded.
++
++## Pinned baseline
++
++Upstream commit: `52e2051a93e6042bc7155065cc12dd3c64d0d70f`.
++Original `src/index.js` SHA-256:
++`795aba8d9fcb72d7f379118850dc300257ed37650a529393c07c03876e20a4fe`.
++
++Command (run before modification):
++
++```sh
++node --input-type=module -e "import w from './src/index.js'; const r=await w.fetch(new Request('https://push-api.matrixsku.com/wxsend'), {API_TOKEN:'SAMPLE'}, {}); console.log(r.status, await r.text())"
++```
++
++Literal output; exit `0`:
++
++```text
++400 {"msg":"Missing required parameters: content, title, token"}
++```
++
++Command (run before modification):
++
++```sh
++node --input-type=module -e "import w from './src/index.js'; const r=await w.fetch(new Request('https://push-api.matrixsku.com/SAMPLE'), {API_TOKEN:'SAMPLE'}, {}); const body=await r.text(); console.log(r.status, body.includes('当前 token (来自路径)'), body.includes('<strong>SAMPLE</strong>'))"
++```
++
++Literal output; exit `0`:
++
++```text
++200 true true
++```
++
++## Hardened behavior
++
++Command:
++
++```sh
++node --input-type=module -e "import w from './src/api.js'; const e={API_HOST:'push-api.matrixsku.com',API_TOKEN:'SAMPLE',WX_APPID:'a',WX_SECRET:'s',WX_USERID:'u',WX_TEMPLATE_ID:'t',VIEW_ORIGIN:'https://push.matrixsku.com',DB:{}}; const a=await w.fetch(new Request('https://push-api.matrixsku.com/wxsend'),e); const b=await w.fetch(new Request('https://push-api.matrixsku.com/SAMPLE'),e); console.log(a.status,await a.text()); console.log(b.status,await b.text())"
++```
++
++Literal output; exit `0`:
++
++```text
++405 {"error":"method_not_allowed"}
++404 {"error":"not_found"}
++```
++
++Command: `npm test`. Literal TAP summary; exit `0`:
++
++```text
++1..5
++# tests 5
++# suites 0
++# pass 5
++# fail 0
++# cancelled 0
++# skipped 0
++# todo 0
++```
++
++Commands (each exit `0`):
++
++```sh
++npx wrangler deploy --dry-run --config wrangler.api.jsonc
++npx wrangler deploy --dry-run --config wrangler.view.jsonc
++```
++
++Literal terminal conclusion from each:
++
++```text
++--dry-run: exiting now.
++```
++
++The dry runs validated bundling and config syntax only. The production
++provisioning and smoke test are recorded below.
++
++## Rollback exercise
++
++Command:
++
++```sh
++./rollback.sh /tmp/wxpush-rollback-check-20261002-001
++```
++
++Literal output; exit `0`:
++
++```text
++Restored upstream 52e2051a93e6042bc7155065cc12dd3c64d0d70f into /tmp/wxpush-rollback-check-20261002-001
++Verified src/index.js SHA-256: 795aba8d9fcb72d7f379118850dc300257ed37650a529393c07c03876e20a4fe
++```
++
++Command:
++
++```sh
++node --input-type=module -e "import w from '/tmp/wxpush-rollback-check-20261002-001/src/index.js'; const r=await w.fetch(new Request('https://push-api.matrixsku.com/SAMPLE'),{API_TOKEN:'SAMPLE'},{}); console.log(r.status,(await r.text()).includes('<strong>SAMPLE</strong>'))"
++```
++
++Literal output; exit `0`:
++
++```text
++200 true
++```
++
++## Live deployment and smoke test
++
++Account: the Cloudflare account controlling `matrixsku.com`. Wrangler 4.146.0
++OAuth used `account:read`, `user:read`, `workers_scripts:write`,
++`workers_routes:write`, `d1:write`, and `zone:read`, with credentials encrypted
++using the macOS Keychain. No existing Worker or D1 database was changed.
++
++Commands and observed results (all exit `0` unless noted):
++
++```sh
++./node_modules/.bin/wrangler d1 create wxpush-messages --location apac
++# Successfully created DB 'wxpush-messages' in region APAC
++# database_id: e8dc4070-ae3d-4ffd-8da8-a05b9935b0a1
++
++./node_modules/.bin/wrangler d1 migrations apply wxpush-messages --remote --config wrangler.api.jsonc
++# 0001_messages.sql: success
++
++./node_modules/.bin/wrangler deploy --config wrangler.api.jsonc
++# wxpush-api; push-api.matrixsku.com; 0 2 * * MON; 0 * * * *
++# initial upload version 13632c14-95b5-486d-b3b1-aeff5eabad98
++
++./node_modules/.bin/wrangler deploy --config wrangler.view.jsonc
++# wxpush-view; push.matrixsku.com
++# initial upload version 7388797a-acc9-4ae4-ad07-6907c910f195
++```
++
++In Cloudflare One, created the one-year `wxpush-codex-agent` Service Token,
++the `wxpush-codex-service-auth` Service Auth policy including only that token,
++and attached it to the API Worker with **All traffic** scope. The Worker Access
++page confirmed production and preview coverage. The local caller credential
++file is `$HOME/.config/wxpush-codex/credentials.env` with mode `0600`; the
++Cloudflare API Worker lists `API_TOKEN`, `WX_APPID`, `WX_SECRET`, `WX_USERID`,
++and `WX_TEMPLATE_ID` as secrets. The View Worker has no WeChat secrets.
++
++```sh
++curl --max-time 20 -sS -D - -o /dev/null -X POST https://push-api.matrixsku.com/wxsend \
++  -H 'Content-Type: application/json' --data '{"title":"probe","content":"no send"}'
++# HTTP/2 403 (Cloudflare Access; exit 0)
++
++printf '%s' '{"title":"wxpush 部署验证","content":"这是一条部署测试消息。点击查看完整详情，链接有效期为 3 天。"}' | \
++  node --env-file="$HOME/.config/wxpush-codex/credentials.env" scripts/send.mjs
++# HTTP 200, sent=1, failed=0, detail_url and expires_at present (exit 0)
++```
++
++With valid Access headers but no or an incorrect Bearer, the API returned
++`401 {"error":"unauthorized"}` (exit `0` for the read-only Node probe). Before
++the Worker Secrets were set, valid Access headers reached the API and returned
++`503 {"error":"service_unavailable"}`. A real WeChat sandbox message titled
++`wxpush 部署验证` returned HTTP 200, `sent=1`, `failed=0`, a random detail URL,
++and an expiry timestamp. A GET to that URL returned HTTP 200 with the expected
++title/body, `Cache-Control: no-store, private`, `Referrer-Policy: no-referrer`,
++and a restrictive CSP; the HTML contained no `<script>`. A random unknown ID
++returned 404. The remote D1 query returned `message_count=1` and
++`min_ttl_seconds=259200`. Account-side `POST /cgi-bin/stable_token` returned
++HTTP 200 with an access token present and `expires_in=7200`; no token was
++printed. The exact 72-hour cutoff and scheduled handler were also exercised
++by the five local tests. Actual receipt and tap-through in WeChat await a
++device-side confirmation; the future Monday Cron has not yet fired.
++
++## Patch replay
++
++Commands on a fresh disposable copy (each exit `0`):
++
++```sh
++./rollback.sh /tmp/wxpush-patch-replay-20261002-002
++git -C /tmp/wxpush-patch-replay-20261002-002 apply --check /Users/geek/Desktop/devops/private-cloud/private-gitlab/ai-life/wxpush-hardened/changes.patch
++git -C /tmp/wxpush-patch-replay-20261002-002 apply /Users/geek/Desktop/devops/private-cloud/private-gitlab/ai-life/wxpush-hardened/changes.patch
++```
++
++The `git apply --check` and `git apply` commands produced no output. The
++restored source hash was the pinned baseline hash above. Running the modified
++behavior command from the patch-replay directory produced:
++
++```text
++405 {"error":"method_not_allowed"}
++404 {"error":"not_found"}
++```
+diff --git a/wrangler.api.jsonc b/wrangler.api.jsonc
+new file mode 100644
+index 0000000..e065d9d
+--- /dev/null
++++ b/wrangler.api.jsonc
+@@ -0,0 +1,25 @@
++{
++  "$schema": "./node_modules/wrangler/config-schema.json",
++  "name": "wxpush-api",
++  "main": "src/api.js",
++  "compatibility_date": "2026-10-02",
++  "workers_dev": false,
++  "preview_urls": false,
++  "routes": [
++    { "pattern": "push-api.matrixsku.com", "custom_domain": true }
++  ],
++  "vars": {
++    "API_HOST": "push-api.matrixsku.com",
++    "VIEW_ORIGIN": "https://push.matrixsku.com"
++  },
++  "d1_databases": [
++    { "binding": "DB", "database_name": "wxpush-messages", "database_id": "e8dc4070-ae3d-4ffd-8da8-a05b9935b0a1", "migrations_dir": "migrations" }
++  ],
++  "triggers": {
++    "crons": ["0 2 * * MON", "0 * * * *"]
++  },
++  "observability": {
++    "enabled": true,
++    "head_sampling_rate": 1
++  }
++}
+diff --git a/wrangler.toml b/wrangler.toml
+deleted file mode 100644
+index 847b1e8..0000000
+--- a/wrangler.toml
++++ /dev/null
+@@ -1,6 +0,0 @@
+-name = "wxpush"
+-main = "src/index.js"
+-compatibility_date = "2023-11-21"
+-
+-[triggers]
+-crons = ["0 2 * * *"]
+diff --git a/wrangler.view.jsonc b/wrangler.view.jsonc
+new file mode 100644
+index 0000000..08b131e
+--- /dev/null
++++ b/wrangler.view.jsonc
+@@ -0,0 +1,21 @@
++{
++  "$schema": "./node_modules/wrangler/config-schema.json",
++  "name": "wxpush-view",
++  "main": "src/view.js",
++  "compatibility_date": "2026-10-02",
++  "workers_dev": false,
++  "preview_urls": false,
++  "routes": [
++    { "pattern": "push.matrixsku.com", "custom_domain": true }
++  ],
++  "vars": {
++    "VIEW_HOST": "push.matrixsku.com"
++  },
++  "d1_databases": [
++    { "binding": "DB", "database_name": "wxpush-messages", "database_id": "e8dc4070-ae3d-4ffd-8da8-a05b9935b0a1", "migrations_dir": "migrations" }
++  ],
++  "observability": {
++    "enabled": true,
++    "head_sampling_rate": 0.1
++  }
++}
